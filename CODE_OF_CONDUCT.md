@@ -89,3 +89,5 @@ Community Impact Guidelines were inspired by Mozilla's code of conduct enforceme
 
 For answers to common questions about this Code of Conduct, see:
 https://www.contributor-covenant.org/faq
+
+Updated: Mar-31-2026
