@@ -25,7 +25,7 @@ config_loader.py
 ### 🧱 Class Naming Convention
 
 * Use **PascalCase** for class names
-* Class name should match responsibility
+* Class names must clearly reflect responsibility
 * Prefer one primary class per file
 
 **Examples:**
@@ -45,11 +45,11 @@ Each Python file must include a header block at the top:
 
 ```python
 """
-File: <filename>
-Description: <short description of what this file does>
-Author: <your name or organization>
-Dev Started On: <YYYY-MM-DD>
-Epic / Related Story: <EPIC-ID or GitHub Issue #>
+file: <filename>
+description: <short description of what this file does>
+author: <your name or organization>
+dev_started_on: <YYYY-MM-DD>
+epic_or_related_story: <EPIC-ID or GitHub Issue #>
 """
 ```
 
@@ -57,11 +57,11 @@ Epic / Related Story: <EPIC-ID or GitHub Issue #>
 
 ```python
 """
-File: metrics_collector.py
-Description: Collects CPU, memory, disk I/O, and network I/O metrics from Linux systems.
-Author: FAMRO LLC
-Dev Started On: 2026-04-01
-Epic / Related Story: #12
+file: metrics_collector.py
+description: Collects CPU, memory, disk I/O, and network I/O metrics from Linux systems.
+author: FAMRO LLC
+dev_started_on: 2026-04-01
+epic_or_related_story: #12
 """
 ```
 
@@ -74,8 +74,8 @@ Each main class should include a docstring describing its purpose and linkage:
 ```python
 class MetricsCollector:
     """
-    Description: Collects core system metrics at defined intervals.
-    Epic / Related Story: #12
+    description: Collects core system metrics at defined intervals.
+    epic_or_related_story: #12
     """
 ```
 
@@ -110,8 +110,8 @@ class MetricsCollector:
 
 Before submitting a PR, ensure:
 
-* [ ] File naming follows conventions
-* [ ] Class naming follows conventions
+* [ ] File naming follows snake_case conventions
+* [ ] Class naming follows PascalCase conventions
 * [ ] File header is present and correct
 * [ ] Class docstrings are added
 * [ ] Epic / Issue reference is included
