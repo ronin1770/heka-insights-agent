@@ -1,3 +1,5 @@
+![Project Logo](./docs/assets/logo.png)
+
 # Heka Insights Agent
 
 **Heka Insights Agent** is a lightweight, extensible, open-source telemetry agent for Linux systems. It is designed to collect core host-level metrics in a unified structure so the output can be consumed by a wide range of observability and monitoring backends such as **Datadog**, **New Relic**, and similar platforms.

@@ -13,7 +13,8 @@ from collectors.cpu import CPUCollector, MonotonicTicker
 from collectors.disk import DiskCollector
 from collectors.memory import MemoryCollector
 from dotenv import load_dotenv
-from formatters.openmetrics import OpenMetricsFormatter
+# from formatters.openmetrics import OpenMetricsFormatter
+from formatters.prometheus import PrometheusFormatter
 from logger.config import get_logger
 
 logger = get_logger(__name__)
@@ -50,7 +51,8 @@ def run_collectors_loop() -> None:
     cpu_collector = CPUCollector(per_cpu=False, detail="detailed")
     memory_collector = MemoryCollector(detail="detailed")
     disk_collector = DiskCollector(detail="detailed")
-    openmetrics_formatter = OpenMetricsFormatter()
+    # openmetrics_formatter = OpenMetricsFormatter()
+    prometheus_formatter = PrometheusFormatter()
     ticker = MonotonicTicker(interval_seconds=interval_seconds)
 
     logger.info(
@@ -71,14 +73,14 @@ def run_collectors_loop() -> None:
         disk_payload = disk_collector.collect()
         logger.info("Disk metrics: %s", disk_payload)
 
-        openmetrics_output = openmetrics_formatter.format(
+        prometheus_output = prometheus_formatter.format(
             {
                 "cpu": cpu_payload,
                 "memory": memory_payload,
                 "disk": disk_payload,
             }
         )
-        print(openmetrics_output, end="", flush=True)
+        print(prometheus_output, end="", flush=True)
 
         ticker.sleep()
 
