@@ -131,19 +131,19 @@ Design highlights:
 
 ## Configuration Resolution
 
-Current config is split across two locations:
+Runtime configuration is handled by `src/config/runtime.py` with one consistent order:
 
-- `CPU_POLL_INTERVAL_SECONDS` is loaded from `src/.env` via `dotenv.load_dotenv(...)` in `main.py`
-- `LOG_LOCATION` is read in logger config from runtime env or repo-root `.env`
+1. process environment
+2. repository root `.env`
+3. per-setting default (if any)
 
-Current config artifacts:
+Current primary settings:
 
-- `.env`
-- `src/.env`
-- `.env.example`
-- `src/.env.example`
+- `LOG_LOCATION` (required)
+- `CPU_POLL_INTERVAL_SECONDS` (default `5.0`)
+- `EXPORTER_TYPE` (default `console`)
 
-This works today, but introduces dual-env-file behavior that operators must account for.
+The runtime uses root `.env` as the single dotenv source.
 
 ## Data Contracts (Current Output Shape)
 
@@ -201,7 +201,6 @@ Disk (`detail="detailed"`):
 - No transport/output adapter layer
 - No retry/backoff/circuit-breaker behavior (not needed yet because no network sender exists)
 - No schema versioning for emitted payloads
-- Configuration is split between root and `src` env files
 - `pyproject.toml` and `Makefile` are placeholders (empty)
 
 ## Extension Points
@@ -220,4 +219,5 @@ The current architecture is ready for the following incremental additions:
 - `src/collectors/cpu.py`: CPU collector + monotonic ticker
 - `src/collectors/memory.py`: memory collector
 - `src/collectors/disk.py`: disk collector
+- `src/config/runtime.py`: unified runtime config loading and accessors
 - `src/logger/config.py`: logger setup and env-backed log path resolution

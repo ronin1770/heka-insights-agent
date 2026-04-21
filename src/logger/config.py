@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
-from pathlib import Path
 
-LOG_ENV_KEY = "LOG_LOCATION"
+from config import get_log_location
+
 LOG_FORMAT = "%(filename)s - %(asctime)s | %(levelname)s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d-%H-%M-%S"
-REPO_ROOT = Path(__file__).resolve().parents[2]
-ENV_FILE = REPO_ROOT / ".env"
 RESET = "\x1b[0m"
 LEVEL_COLORS = {
     logging.DEBUG: "\x1b[36m",      # cyan
@@ -33,38 +30,13 @@ class ColorFormatter(logging.Formatter):
         return f"{color}{message}{RESET}"
 
 
-def _read_log_location() -> Path:
-    """Return log path from env var or repo-root .env, fail if missing."""
-    env_value = os.getenv(LOG_ENV_KEY)
-    if env_value:
-        env_path = Path(env_value).expanduser()
-        return env_path if env_path.is_absolute() else (REPO_ROOT / env_path)
-
-    if not ENV_FILE.exists():
-        raise RuntimeError("LOG_LOCATION is not set and .env file was not found.")
-
-    for raw_line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if not line.startswith(f"{LOG_ENV_KEY}="):
-            continue
-        value = line.split("=", 1)[1].strip().strip('"').strip("'")
-        if not value:
-            break
-        env_path = Path(value).expanduser()
-        return env_path if env_path.is_absolute() else (REPO_ROOT / env_path)
-
-    raise RuntimeError("LOG_LOCATION is missing or empty in environment and .env.")
-
-
 def get_logger(name: str = "heka_insights_agent") -> logging.Logger:
     """Create and return a configured file logger."""
     logger = logging.getLogger(name)
     if logger.handlers:
         return logger
 
-    log_path = _read_log_location()
+    log_path = get_log_location()
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:

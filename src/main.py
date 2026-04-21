@@ -6,48 +6,21 @@ dev_started_on: 2026-04-01
 epic_or_related_story: EPIC ID: #2
 """
 
-import os
-from pathlib import Path
-
+from config import get_cpu_poll_interval_seconds, get_exporter_type
 from collectors.cpu import CPUCollector, MonotonicTicker
 from collectors.disk import DiskCollector
 from collectors.memory import MemoryCollector
-from dotenv import load_dotenv
 # from formatters.openmetrics import OpenMetricsFormatter
 from formatters.prometheus import PrometheusFormatter
 from logger.config import get_logger
 
 logger = get_logger(__name__)
-CPU_POLL_INTERVAL_ENV_KEY = "CPU_POLL_INTERVAL_SECONDS"
-DEFAULT_CPU_POLL_INTERVAL_SECONDS = 5.0
-ENV_FILE = Path(__file__).resolve().parent / ".env"
-load_dotenv(ENV_FILE, override=False)
-
-
-def _cpu_poll_interval_seconds() -> float:
-    raw_value = os.getenv(CPU_POLL_INTERVAL_ENV_KEY)
-    if not raw_value:
-        return DEFAULT_CPU_POLL_INTERVAL_SECONDS
-
-    try:
-        interval = float(raw_value)
-        if interval > 0:
-            return interval
-    except ValueError:
-        pass
-
-    logger.warning(
-        "Invalid %s value '%s'; using default %.1f",
-        CPU_POLL_INTERVAL_ENV_KEY,
-        raw_value,
-        DEFAULT_CPU_POLL_INTERVAL_SECONDS,
-    )
-    return DEFAULT_CPU_POLL_INTERVAL_SECONDS
 
 
 def run_collectors_loop() -> None:
     """Run CPU, memory, and disk collectors with a fixed, drift-safe cadence."""
-    interval_seconds = _cpu_poll_interval_seconds()
+    interval_seconds = get_cpu_poll_interval_seconds(logger=logger)
+    exporter_type = get_exporter_type(logger=logger)
     cpu_collector = CPUCollector(per_cpu=False, detail="detailed")
     memory_collector = MemoryCollector(detail="detailed")
     disk_collector = DiskCollector(detail="detailed")
@@ -56,8 +29,9 @@ def run_collectors_loop() -> None:
     ticker = MonotonicTicker(interval_seconds=interval_seconds)
 
     logger.info(
-        "CPU, memory, and disk collectors initialized | interval_seconds=%.1f",
+        "CPU, memory, and disk collectors initialized | interval_seconds=%.1f | exporter_type=%s",
         interval_seconds,
+        exporter_type,
     )
 
     while True:

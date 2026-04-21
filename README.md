@@ -268,44 +268,50 @@ pip install -r requirements.txt
 
 ## Environment Configuration
 
-The project uses a `.env` file for runtime configuration.
+Runtime configuration is loaded from a single file at repository root:
 
-Example:
+- `./.env`
 
-```env
-CPU_POLL_INTERVAL_SECONDS=10
-````
-
-### Current Environment Variable
-
-#### `CPU_POLL_INTERVAL_SECONDS`
-
-Defines how often the CPU collector should poll and emit CPU usage data.
-
-Example:
-
-```env
-CPU_POLL_INTERVAL_SECONDS=10
-```
-
-This means the agent will collect CPU metrics every **10 seconds**.
-
-You should keep this value:
-
-* low enough for useful monitoring resolution
-* high enough to avoid unnecessary system overhead
-
-For local development, copy the example file if needed:
+Copy the example file:
 
 ```bash
 cp .env.example .env
 ```
 
-Then update the value inside `.env` as required.
+Set values in `./.env`:
 
-```
+```env
+LOG_LOCATION=./log/heka_agent.log
+CPU_POLL_INTERVAL_SECONDS=10
+EXPORTER_TYPE=console
 ```
 
+### Environment Variables
+
+#### `LOG_LOCATION`
+
+Path to the application log file. Relative paths resolve from the repository root.
+
+#### `CPU_POLL_INTERVAL_SECONDS`
+
+Defines collector loop cadence in seconds. Must be a positive number.
+Invalid values fall back to `5.0` with a warning.
+
+#### `EXPORTER_TYPE`
+
+Exporter selection setting for the delivery layer foundation.
+
+Supported values:
+
+- `console`
+- `otlp_http`
+- `datadog_native`
+- `newrelic_otlp`
+
+Current behavior in M3-2:
+
+- missing value defaults to `console`
+- unsupported values fall back to `console` with a warning
 
 ### Run the application
 
