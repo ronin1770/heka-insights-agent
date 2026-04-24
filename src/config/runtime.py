@@ -73,7 +73,7 @@ def get_cpu_poll_interval_seconds(
 
 
 def get_exporter_type(*, logger: logging.Logger | None = None) -> ExporterType:
-    """Return normalized exporter selector with non-fatal fallback."""
+    """Return normalized exporter selector and fail fast on invalid values."""
     raw_value = os.getenv(EXPORTER_TYPE_ENV_KEY, "").strip().lower()
     if not raw_value:
         return DEFAULT_EXPORTER_TYPE
@@ -81,11 +81,11 @@ def get_exporter_type(*, logger: logging.Logger | None = None) -> ExporterType:
     if raw_value in SUPPORTED_EXPORTER_TYPES:
         return cast(ExporterType, raw_value)
 
+    supported_values = ", ".join(SUPPORTED_EXPORTER_TYPES)
+    message = (
+        f"Invalid {EXPORTER_TYPE_ENV_KEY} value '{raw_value}'. "
+        f"Supported values: {supported_values}."
+    )
     if logger is not None:
-        logger.warning(
-            "Unsupported %s value '%s'; using default '%s'.",
-            EXPORTER_TYPE_ENV_KEY,
-            raw_value,
-            DEFAULT_EXPORTER_TYPE,
-        )
-    return DEFAULT_EXPORTER_TYPE
+        logger.error(message)
+    raise RuntimeError(message)

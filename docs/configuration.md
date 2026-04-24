@@ -31,9 +31,8 @@ Use only one dotenv file:
 `EXPORTER_TYPE` currently provides deterministic selection configuration with normalization (`strip` + lowercase).
 
 - Missing value: defaults to `console`
-- Unsupported value: falls back to `console` and logs a warning
-
-Strict fail-fast validation for unsupported exporter values is planned for Milestone M3-4.
+- Unsupported value: startup fails fast with explicit error
+- Configured but unimplemented exporter (`otlp_http`, `datadog_native`, `newrelic_otlp`): startup fails fast with explicit error
 
 ## Recommended Local Setup
 

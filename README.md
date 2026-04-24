@@ -308,10 +308,11 @@ Supported values:
 - `datadog_native`
 - `newrelic_otlp`
 
-Current behavior in M3-2:
+Current behavior in M3-4:
 
 - missing value defaults to `console`
-- unsupported values fall back to `console` with a warning
+- unsupported values fail fast at startup with an explicit error
+- configured but unimplemented exporters (`otlp_http`, `datadog_native`, `newrelic_otlp`) fail fast at startup with an explicit error
 
 ### Run the application
 
