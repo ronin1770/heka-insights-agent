@@ -2,91 +2,75 @@
 
 ## Overview
 
-The current implementation uses two configuration variables:
+Runtime settings are now loaded through a unified configuration module.
 
-- `LOG_LOCATION`
-- `CPU_POLL_INTERVAL_SECONDS`
+All variables are resolved using one consistent order:
 
-These are loaded from different places in the current codebase, so this document shows exact resolution order and recommended setup.
+1. Process environment variables
+2. Repository root `.env` (`./.env`)
+3. Per-setting default (if defined)
 
-## Configuration Sources
+## Configuration File
 
-### `LOG_LOCATION`
+Use only one dotenv file:
 
-Used by `src/logger/config.py` to initialize the file logger.
+- `./.env` (repository root)
 
-Resolution order:
-
-1. Process environment variable `LOG_LOCATION`
-2. Repository root `.env` file (`./.env`)
-3. Fail fast with `RuntimeError` if not found or empty
-
-Notes:
-
-- Relative paths are resolved against the repository root.
-- The logger attempts to create/open the file at startup; permission errors stop startup.
-
-### `CPU_POLL_INTERVAL_SECONDS`
-
-Used by `src/main.py` to control the collector loop cadence.
-
-Resolution behavior:
-
-1. `src/.env` is loaded with `load_dotenv(..., override=False)`
-2. Existing process env value (if set) is not overridden
-3. If missing: default to `5.0`
-4. If invalid (non-numeric or `<= 0`): warn and use `5.0`
+`src/.env` is no longer used for runtime configuration.
 
 ## Variable Reference
 
-| Variable | Type | Default | Where it is read | Example |
-|---|---|---|---|---|
-| `LOG_LOCATION` | string path | none (required) | `src/logger/config.py` | `LOG_LOCATION=./log/heka_agent.log` |
-| `CPU_POLL_INTERVAL_SECONDS` | float (`> 0`) | `5.0` | `src/main.py` | `CPU_POLL_INTERVAL_SECONDS=10` |
+| Variable | Type | Default | Current behavior |
+|---|---|---|---|
+| `LOG_LOCATION` | string path | none (required) | Startup fails if missing/empty or unwritable |
+| `CPU_POLL_INTERVAL_SECONDS` | float (`> 0`) | `5.0` | Invalid values fall back to default with warning |
+| `EXPORTER_TYPE` | enum | `console` | Supported: `console`, `otlp_http`, `datadog_native`, `newrelic_otlp` |
+
+## Exporter Selector
+
+`EXPORTER_TYPE` currently provides deterministic selection configuration with normalization (`strip` + lowercase).
+
+- Missing value: defaults to `console`
+- Unsupported value: startup fails fast with explicit error
+- Configured but unimplemented exporter (`otlp_http`, `datadog_native`, `newrelic_otlp`): startup fails fast with explicit error
+
+## Exporter Validation Outcomes
+
+| `EXPORTER_TYPE` value | Startup result |
+|---|---|
+| _missing_ | resolves to `console` and starts |
+| `console` | starts with console exporter |
+| `otlp_http` | fails fast (`RuntimeError`: exporter not implemented) |
+| `datadog_native` | fails fast (`RuntimeError`: exporter not implemented) |
+| `newrelic_otlp` | fails fast (`RuntimeError`: exporter not implemented) |
+| any other value | fails fast (`RuntimeError`: invalid selector value) |
+
+## Lifecycle Notes
+
+Exporter lifecycle is always:
+
+1. `initialize()` on startup
+2. `export(metrics)` on each collection cycle
+3. `shutdown()` in application teardown (`finally`)
+
+For full delivery architecture and responsibility boundaries, see `docs/architecture.md`.
 
 ## Recommended Local Setup
 
-Create both env files used by the current implementation:
-
 ```bash
 cp .env.example .env
-cp src/.env.example src/.env
 ```
 
-Then set values:
-
-`./.env`
+Then edit `./.env`:
 
 ```env
 LOG_LOCATION=./log/heka_agent.log
-```
-
-`src/.env`
-
-```env
 CPU_POLL_INTERVAL_SECONDS=10
+EXPORTER_TYPE=console
 ```
 
 ## Production Guidance
 
-- Prefer an absolute log path for `LOG_LOCATION` in production.
-- Ensure the service user has write permission to the log directory.
-- Keep `CPU_POLL_INTERVAL_SECONDS` high enough to avoid unnecessary host overhead.
-- If you set values via your process manager (systemd, container env), those values take precedence over dotenv-loaded values.
-
-## Effective Configuration Summary
-
-At startup:
-
-1. Logger initializes first and requires `LOG_LOCATION` (env or root `.env`)
-2. `src/.env` is loaded for runtime settings like `CPU_POLL_INTERVAL_SECONDS`
-3. Collector loop starts with validated poll interval
-
-## Known Quirk (Current State)
-
-Configuration is currently split between:
-
-- root `.env` for logger
-- `src/.env` for polling interval
-
-This is intentional in current code behavior, but future refactoring should consolidate to a single config source.
+- Prefer absolute paths for `LOG_LOCATION`.
+- Ensure the service user can create/write the configured log file.
+- Override values via process environment in systemd or containers when needed.

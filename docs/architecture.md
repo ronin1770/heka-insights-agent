@@ -1,223 +1,152 @@
 # Heka Insights Agent Architecture
 
-## Purpose and Current Scope
+## Purpose
 
-Heka Insights Agent is a host telemetry collector focused on Linux environments.
-The current implementation provides:
+Heka Insights Agent collects host telemetry and routes it through a delivery pipeline designed for future backend integrations.
 
-- CPU usage collection (`CPUCollector`)
-- Memory usage collection (`MemoryCollector`)
-- Disk I/O counter collection (`DiskCollector`)
-- Structured logging to both file and stdout
-- A fixed-cadence polling loop
+The Milestone 3 foundation keeps collection separate from delivery so new exporters can be added without changing collectors.
 
-There is currently no network transport, batching, persistence, or external backend sender in the codebase.
-
-## Runtime Topology
+## Runtime Delivery Topology
 
 ```text
-┌───────────────────────────┐
-│        src/main.py        │
-│  - startup / main loop    │
-│  - env interval parsing   │
-└──────────────┬────────────┘
-               │
-       every polling cycle
-               │
-   ┌───────────┼───────────┐
-   │           │           │
-┌──▼───┐   ┌───▼────┐   ┌──▼────┐
-│ CPU  │   │ Memory │   │ Disk  │
-│collector│ │collector│  │collector│
-└──┬───┘   └───┬────┘   └──┬────┘
-   │           │           │
-   └───────┬───┴───────┬───┘
-           │           │
-     payload dicts  payload dicts
-           │
-     ┌─────▼──────────────────────┐
-     │ logger/config.py           │
-     │ - file handler (required)  │
-     │ - colored stdout handler   │
-     └────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                         src/main.py                         │
+│   startup + validation + lifecycle orchestration            │
+└───────────────┬─────────────────────────────────────────────┘
+                │
+                │ collect raw payloads (cpu/memory/disk)
+                ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    collectors/*                             │
+│ CPUCollector | MemoryCollector | DiskCollector              │
+└───────────────┬─────────────────────────────────────────────┘
+                │
+                │ normalize
+                ▼
+┌─────────────────────────────────────────────────────────────┐
+│            pipeline/canonical_metrics.py                    │
+│          build_canonical_metrics(payloads, ts)              │
+└───────────────┬─────────────────────────────────────────────┘
+                │
+                │ canonical metric collection
+                ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   exporters/base.py                         │
+│       Exporter.initialize -> export -> shutdown             │
+└───────────────┬─────────────────────────────────────────────┘
+                │
+                │ selected exporter instance
+                ▼
+┌─────────────────────────────────────────────────────────────┐
+│                exporters/console.py                         │
+│       PrometheusFormatter.format_canonical(metrics)         │
+│                    writes to stdout                         │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## Main Control Loop
+## Exporter Lifecycle
 
-The entrypoint is `src/main.py`.
+Every exporter follows the same lifecycle contract:
 
-Execution model:
+1. `initialize()`
+2. `export(metrics)` on each polling cycle
+3. `shutdown()` on process shutdown (`finally`)
 
-1. Initialize logger via `get_logger(__name__)`
-2. Load `src/.env` (for poll interval)
-3. Create collectors:
-   - `CPUCollector(per_cpu=False, detail="detailed")`
-   - `MemoryCollector(detail="detailed")`
-   - `DiskCollector(detail="detailed")`
-4. Create `MonotonicTicker(interval_seconds=<configured>)`
-5. Enter infinite `while True` loop:
-   - Collect CPU, memory, disk payloads
-   - Emit each payload as a log line
-   - Sleep until next monotonic deadline
+Lifecycle intent:
 
-Shutdown behavior:
+- `initialize()` prepares exporter resources and validates exporter-owned runtime assumptions.
+- `export(metrics)` receives canonical metrics only.
+- `shutdown()` releases owned resources and flushes pending work if needed.
 
-- `KeyboardInterrupt` is caught in `main()` and logged as a controlled shutdown.
+## Responsibility Boundaries
 
-## Component Design
+| Layer | Responsibility | Must Not Do |
+|---|---|---|
+| Collectors (`src/collectors`) | Read system telemetry from `psutil` and return raw payload dictionaries | Know exporter type or backend transport details |
+| Pipeline (`src/pipeline/canonical_metrics.py`) | Convert raw collector payloads into canonical metric records | Perform transport or backend-specific delivery |
+| Formatter (`src/formatters/prometheus.py`) | Render canonical metrics into a reusable output format | Collect metrics directly from the OS |
+| Exporter (`src/exporters`) | Own destination delivery behavior and lifecycle | Reach into collector internals or collector-specific payload shape |
+| Runtime orchestration (`src/main.py`) | Wire lifecycle and sequence calls deterministically | Hardcode output transport behavior inside loop |
 
-### CPU Collector
+## Startup Validation Rules
 
-Implementation: `src/collectors/cpu.py`
+Exporter startup is validated in two stages:
 
-Design highlights:
+1. `get_exporter_type()` validates `EXPORTER_TYPE` against supported enum values.
+2. `create_exporter()` validates implementation availability for selected type.
 
-- Uses `psutil.cpu_times(...)` snapshots and delta math (not `cpu_percent`)
-- First `collect()` call returns a warm-up payload (`warming_up=True`)
-- Supports:
-  - aggregate or per-core mode (`per_cpu`)
-  - `basic` or `detailed` payload detail
-  - configurable rounding precision
-- Resets to warm-up if CPU entry count changes between polls
-- Includes `MonotonicTicker` utility for drift-resistant scheduling
+Current startup behavior:
 
-Warm-up behavior is intentional because utilization is derived from differences between consecutive samples.
+- Missing `EXPORTER_TYPE` -> defaults to `console`
+- Invalid `EXPORTER_TYPE` value -> fail fast with explicit `RuntimeError`
+- Configured but unimplemented exporter (`otlp_http`, `datadog_native`, `newrelic_otlp`) -> fail fast with explicit `RuntimeError`
 
-### Memory Collector
+This prevents silent fallback behavior and makes runtime intent explicit.
 
-Implementation: `src/collectors/memory.py`
+## Runtime Sequence
 
-Design highlights:
+Per process start:
 
-- Reads:
-  - `psutil.virtual_memory()`
-  - `psutil.swap_memory()`
-- `basic` mode returns a curated field subset
-- `detailed` mode returns all discovered psutil fields
-- Float values are rounded when configured
-- Uses field-name caching to reduce repeated introspection cost
+1. logger initializes
+2. exporter type resolves from config
+3. exporter instance is created
+4. exporter `initialize()` runs
 
-### Disk Collector
+Per collection cycle:
 
-Implementation: `src/collectors/disk.py`
+1. CPU, memory, and disk collectors gather raw payloads
+2. payloads convert to canonical metrics
+3. exporter `export(canonical_metrics)` runs
+4. monotonic ticker sleeps to next fixed cadence
 
-Design highlights:
+On shutdown:
 
-- Uses cumulative counters from `psutil.disk_io_counters(perdisk=True)`
-- Filters device names to physical devices only
-- Excludes loop/ram/fd and partition-like names
-- Produces:
-  - `disk_io` (aggregate counters)
-  - `disk_io_perdisk` (when `detail="detailed"`)
-- Caches filtered device names and refreshes every 12 collects
+1. `KeyboardInterrupt` is handled in `main`
+2. exporter `shutdown()` always runs in `finally`
 
-This collector emits counters, not rates. Rate/derivative calculations are expected downstream.
+## Canonical Metric Model
 
-### Logging Subsystem
+Canonical metrics include:
 
-Implementation: `src/logger/config.py`
+- `name`
+- `description`
+- `type`
+- `unit`
+- `value`
+- `labels`
+- optional `timestamp_unix_ms`
 
-Design highlights:
+Exporters consume this model, not collector-specific payloads.
 
-- Requires `LOG_LOCATION` from:
-  - process environment, or
-  - repo-root `.env` file
-- Fails fast with `RuntimeError` if log path is unavailable/unwritable
-- Configures two handlers:
-  - file handler (`LOG_FORMAT`, `LOG_DATE_FORMAT`)
-  - colored stdout stream handler
-- Sets logger level to `DEBUG`
-- Disables propagation (`logger.propagate = False`)
+## Current Exporter Availability
 
-## Configuration Resolution
+Implemented:
 
-Current config is split across two locations:
+- `console`
 
-- `CPU_POLL_INTERVAL_SECONDS` is loaded from `src/.env` via `dotenv.load_dotenv(...)` in `main.py`
-- `LOG_LOCATION` is read in logger config from runtime env or repo-root `.env`
+Declared but not yet implemented:
 
-Current config artifacts:
+- `otlp_http`
+- `datadog_native`
+- `newrelic_otlp`
 
-- `.env`
-- `src/.env`
-- `.env.example`
-- `src/.env.example`
+The factory currently fails fast for unimplemented exporters.
 
-This works today, but introduces dual-env-file behavior that operators must account for.
+## How To Add A New Exporter
 
-## Data Contracts (Current Output Shape)
-
-CPU (`per_cpu=False`, `detail="detailed"`):
-
-```python
-{
-  "warming_up": False,
-  "percent": 27.31,
-  "times_percent": {
-    "user": 8.11,
-    "system": 4.27,
-    "idle": 86.02,
-    "iowait": 0.32
-  }
-}
-```
-
-Memory (`detail="detailed"`):
-
-```python
-{
-  "virtual_memory": {...},
-  "swap_memory": {...}
-}
-```
-
-Disk (`detail="detailed"`):
-
-```python
-{
-  "disk_io": {
-    "read_bytes": ...,
-    "write_bytes": ...,
-    "read_count": ...,
-    "write_count": ...
-  },
-  "disk_io_perdisk": {
-    "sda": {...},
-    "nvme0n1": {...}
-  }
-}
-```
-
-## Operational Characteristics
-
-- Scheduling cadence defaults to `5.0` seconds if poll interval is invalid/missing
-- Collector loop is single-process, single-threaded
-- Runtime overhead is low by design, with most wall-clock time spent sleeping
-- Logs are the only output channel today
-
-## Known Gaps and Risks
-
-- No test coverage in `tests/` yet
-- No transport/output adapter layer
-- No retry/backoff/circuit-breaker behavior (not needed yet because no network sender exists)
-- No schema versioning for emitted payloads
-- Configuration is split between root and `src` env files
-- `pyproject.toml` and `Makefile` are placeholders (empty)
-
-## Extension Points
-
-The current architecture is ready for the following incremental additions:
-
-1. Introduce a `sender/` module with backend adapters (Datadog/New Relic/custom)
-2. Add in-process normalization/schema module between collectors and sender
-3. Add bounded queue + batching/compression before send
-4. Add health metrics (loop latency, send success/failure, queue depth)
-5. Add automated tests for collector correctness and edge cases
+1. Create a new exporter class under `src/exporters/` implementing `Exporter`.
+2. Implement `initialize()`, `export()`, and `shutdown()`.
+3. Ensure `export()` accepts canonical metrics (no collector payload assumptions).
+4. Wire the exporter into `create_exporter()` in `src/exporters/factory.py`.
+5. Validate required configuration during startup path and fail fast on invalid config.
+6. Keep collectors unchanged.
 
 ## File Map
 
-- `src/main.py`: startup, configuration parsing, polling loop
-- `src/collectors/cpu.py`: CPU collector + monotonic ticker
-- `src/collectors/memory.py`: memory collector
-- `src/collectors/disk.py`: disk collector
-- `src/logger/config.py`: logger setup and env-backed log path resolution
+- `src/main.py`: startup orchestration and lifecycle execution
+- `src/config/runtime.py`: runtime configuration loading and exporter selector validation
+- `src/pipeline/canonical_metrics.py`: raw payload to canonical metric normalization
+- `src/exporters/base.py`: exporter contract and canonical metric types
+- `src/exporters/factory.py`: exporter selection and implementation availability checks
+- `src/exporters/console.py`: console exporter adapter
+- `src/formatters/prometheus.py`: Prometheus rendering from canonical metrics
