@@ -6,6 +6,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from exporters.base import CanonicalMetricCollection
+
 
 @dataclass(frozen=True)
 class _FamilyMeta:
@@ -117,6 +119,57 @@ class PrometheusFormatter:
             lines.append(f"# HELP {family_name} {self._escape_help(meta.help_text)}")
             lines.append(f"# TYPE {family_name} {meta.metric_type}")
             for labels, value in family_samples:
+                lines.append(
+                    self._format_sample(
+                        name=family_name,
+                        value=value,
+                        labels=labels,
+                        timestamp=timestamp,
+                    )
+                )
+
+        return "\n".join(lines) + "\n"
+
+    def format_canonical(self, metrics: CanonicalMetricCollection) -> str:
+        """Render canonical metrics into Prometheus text format."""
+        grouped: dict[str, list[Mapping[str, Any]]] = {}
+        family_order: list[str] = []
+
+        for metric in metrics:
+            metric_name = str(metric.get("name", "")).strip()
+            if not metric_name:
+                continue
+            if metric_name not in grouped:
+                grouped[metric_name] = []
+                family_order.append(metric_name)
+            grouped[metric_name].append(metric)
+
+        lines: list[str] = []
+        for family_name in family_order:
+            family_metrics = grouped[family_name]
+            if not family_metrics:
+                continue
+
+            first = family_metrics[0]
+            help_text = str(first.get("description", "")).strip()
+            metric_type = str(first.get("type", "gauge")).strip() or "gauge"
+            lines.append(f"# HELP {family_name} {self._escape_help(help_text)}")
+            lines.append(f"# TYPE {family_name} {metric_type}")
+
+            for sample in family_metrics:
+                value = sample.get("value")
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    continue
+
+                raw_labels = sample.get("labels")
+                labels: dict[str, str] = {}
+                if isinstance(raw_labels, Mapping):
+                    labels = {
+                        str(key): str(label_value)
+                        for key, label_value in raw_labels.items()
+                    }
+
+                timestamp = self._format_timestamp(sample.get("timestamp_unix_ms"))
                 lines.append(
                     self._format_sample(
                         name=family_name,
