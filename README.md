@@ -314,12 +314,44 @@ Current behavior in M3-4:
 - unsupported values fail fast at startup with an explicit error
 - configured but unimplemented exporters (`otlp_http`, `datadog_native`, `newrelic_otlp`) fail fast at startup with an explicit error
 
+## Exporter Lifecycle (M3 Foundation)
+
+Runtime delivery now follows a stable sequence:
+
+1. Collect raw payloads from collectors.
+2. Normalize payloads into canonical metrics.
+3. Call exporter lifecycle methods:
+   - `initialize()` at startup
+   - `export(metrics)` every collection cycle
+   - `shutdown()` during teardown
+
+Responsibility split:
+
+- collectors gather telemetry
+- pipeline normalizes to canonical model
+- formatter renders output
+- exporter handles destination delivery
+
+This separation allows new exporters to be added without collector changes.
+
+See detailed docs:
+
+- `docs/architecture.md` for full flow and boundaries
+- `docs/configuration.md` for exporter validation behavior
+
+## Adding A New Exporter (Current Rule)
+
+1. Implement `Exporter` contract under `src/exporters/`.
+2. Wire it in `src/exporters/factory.py`.
+3. Ensure startup fails fast if required exporter config is invalid.
+4. Keep collector modules unchanged.
+
 ### Run the application
 
 Depending on your entrypoint setup:
 
 ```bash
-python main.py
+python src/main.py
 ```
 
 If the main entrypoint changes later, update this section accordingly.

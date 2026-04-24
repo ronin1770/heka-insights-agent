@@ -34,6 +34,27 @@ Use only one dotenv file:
 - Unsupported value: startup fails fast with explicit error
 - Configured but unimplemented exporter (`otlp_http`, `datadog_native`, `newrelic_otlp`): startup fails fast with explicit error
 
+## Exporter Validation Outcomes
+
+| `EXPORTER_TYPE` value | Startup result |
+|---|---|
+| _missing_ | resolves to `console` and starts |
+| `console` | starts with console exporter |
+| `otlp_http` | fails fast (`RuntimeError`: exporter not implemented) |
+| `datadog_native` | fails fast (`RuntimeError`: exporter not implemented) |
+| `newrelic_otlp` | fails fast (`RuntimeError`: exporter not implemented) |
+| any other value | fails fast (`RuntimeError`: invalid selector value) |
+
+## Lifecycle Notes
+
+Exporter lifecycle is always:
+
+1. `initialize()` on startup
+2. `export(metrics)` on each collection cycle
+3. `shutdown()` in application teardown (`finally`)
+
+For full delivery architecture and responsibility boundaries, see `docs/architecture.md`.
+
 ## Recommended Local Setup
 
 ```bash
