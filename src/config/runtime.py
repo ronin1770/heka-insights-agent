@@ -15,6 +15,7 @@ ENV_FILE = REPO_ROOT / ".env"
 LOG_LOCATION_ENV_KEY = "LOG_LOCATION"
 CPU_POLL_INTERVAL_ENV_KEY = "CPU_POLL_INTERVAL_SECONDS"
 EXPORTER_TYPE_ENV_KEY = "EXPORTER_TYPE"
+OTLP_HTTP_ENDPOINT_ENV_KEY = "OTLP_HTTP_ENDPOINT"
 
 DEFAULT_CPU_POLL_INTERVAL_SECONDS = 5.0
 
@@ -85,6 +86,21 @@ def get_exporter_type(*, logger: logging.Logger | None = None) -> ExporterType:
     message = (
         f"Invalid {EXPORTER_TYPE_ENV_KEY} value '{raw_value}'. "
         f"Supported values: {supported_values}."
+    )
+    if logger is not None:
+        logger.error(message)
+    raise RuntimeError(message)
+
+
+def get_otlp_http_endpoint(*, logger: logging.Logger | None = None) -> str:
+    """Return OTLP HTTP endpoint and fail fast when missing."""
+    endpoint = os.getenv(OTLP_HTTP_ENDPOINT_ENV_KEY, "").strip()
+    if endpoint:
+        return endpoint
+
+    message = (
+        f"{OTLP_HTTP_ENDPOINT_ENV_KEY} is required when "
+        f"{EXPORTER_TYPE_ENV_KEY}=otlp_http."
     )
     if logger is not None:
         logger.error(message)

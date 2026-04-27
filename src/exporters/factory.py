@@ -8,6 +8,7 @@ from config import ExporterType
 
 from .base import Exporter
 from .console import ConsoleExporter
+from .otlp_http import OtlpHttpExporter
 
 
 def create_exporter(
@@ -18,6 +19,8 @@ def create_exporter(
     """Return an exporter instance for the selected runtime type."""
     if exporter_type == "console":
         return ConsoleExporter()
+    if exporter_type == "otlp_http":
+        return OtlpHttpExporter(logger=logger)
 
     message = (
         f"Exporter '{exporter_type}' is configured but not implemented yet. "
