@@ -19,9 +19,14 @@ class OtlpPayloadMapper:
         *,
         now_unix_ms: Callable[[], int] | None = None,
         scope_name: str = "heka-insights-agent",
+        resource_attributes: Mapping[str, str] | None = None,
     ) -> None:
         self._now_unix_ms = now_unix_ms or (lambda: int(time.time() * 1000))
         self._scope_name = scope_name
+        self._resource_attributes = self._normalize_string_mapping(
+            resource_attributes or {},
+            field_name="resource_attributes",
+        )
 
     def map_metrics(self, metrics: CanonicalMetricCollection) -> dict[str, Any]:
         """Build one OTLP metrics payload for a canonical metric collection."""
@@ -37,7 +42,9 @@ class OtlpPayloadMapper:
         return {
             "resourceMetrics": [
                 {
-                    "resource": {"attributes": []},
+                    "resource": {
+                        "attributes": self._map_attributes(self._resource_attributes)
+                    },
                     "scopeMetrics": [
                         {
                             "scope": {"name": self._scope_name},
@@ -131,3 +138,16 @@ class OtlpPayloadMapper:
                     f"Metric '{metric['name']}' at index {index} has invalid "
                     "timestamp_unix_ms."
                 )
+
+    @staticmethod
+    def _normalize_string_mapping(
+        mapping: Mapping[str, str],
+        *,
+        field_name: str,
+    ) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for key, value in mapping.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise ValueError(f"{field_name} must contain only string keys and values.")
+            normalized[key] = value
+        return normalized

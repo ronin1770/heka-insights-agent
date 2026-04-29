@@ -58,6 +58,78 @@ class OtlpHttpExporterTests(unittest.TestCase):
         mapped = sender.payloads[0]["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0]
         self.assertEqual(mapped["name"], "heka_cpu_usage_percent")
 
+    def test_initialize_applies_env_headers_and_resource_attributes(self) -> None:
+        sender = _SenderStub()
+        with patch.dict(
+            os.environ,
+            {
+                "OTLP_HTTP_ENDPOINT": "https://collector.example.com/v1/metrics",
+                "OTLP_HTTP_HEADERS": "api-key=abc123,authorization=Bearer token",
+                "OTLP_RESOURCE_ATTRIBUTES": "service.name=heka,host.name=node-a",
+            },
+            clear=True,
+        ):
+            exporter = OtlpHttpExporter(sender=sender)
+            exporter.initialize()
+
+            self.assertEqual(
+                exporter.health_status(),
+                {
+                    "initialized": True,
+                    "endpoint": "https://collector.example.com/v1/metrics",
+                    "headers_configured": 2,
+                    "resource_attributes_configured": 2,
+                },
+            )
+
+            metric = {
+                "name": "heka_cpu_usage_percent",
+                "description": "CPU usage percentage.",
+                "type": "gauge",
+                "unit": "percent",
+                "value": 50.0,
+                "labels": {},
+            }
+            exporter.export([metric])
+
+        self.assertEqual(len(sender.payloads), 1)
+        resource_attrs = sender.payloads[0]["resourceMetrics"][0]["resource"]["attributes"]
+        self.assertEqual(
+            resource_attrs,
+            [
+                {"key": "host.name", "value": {"stringValue": "node-a"}},
+                {"key": "service.name", "value": {"stringValue": "heka"}},
+            ],
+        )
+
+    def test_initialize_fails_on_invalid_otlp_http_headers(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OTLP_HTTP_ENDPOINT": "https://collector.example.com/v1/metrics",
+                "OTLP_HTTP_HEADERS": "invalid-entry",
+            },
+            clear=True,
+        ):
+            exporter = OtlpHttpExporter()
+            with self.assertRaisesRegex(RuntimeError, "Invalid OTLP_HTTP_HEADERS"):
+                exporter.initialize()
+
+    def test_initialize_fails_on_invalid_resource_attributes(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OTLP_HTTP_ENDPOINT": "https://collector.example.com/v1/metrics",
+                "OTLP_RESOURCE_ATTRIBUTES": "service.name=",
+            },
+            clear=True,
+        ):
+            exporter = OtlpHttpExporter()
+            with self.assertRaisesRegex(
+                RuntimeError, "Invalid OTLP_RESOURCE_ATTRIBUTES"
+            ):
+                exporter.initialize()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -79,7 +79,8 @@ Current startup behavior:
 
 - Missing `EXPORTER_TYPE` -> defaults to `console`
 - Invalid `EXPORTER_TYPE` value -> fail fast with explicit `RuntimeError`
-- Configured but unimplemented exporter (`otlp_http`, `datadog_native`, `newrelic_otlp`) -> fail fast with explicit `RuntimeError`
+- `EXPORTER_TYPE=otlp_http` -> exporter initializes when OTLP endpoint/config is valid
+- Configured but unimplemented exporter (`datadog_native`, `newrelic_otlp`) -> fail fast with explicit `RuntimeError`
 
 This prevents silent fallback behavior and makes runtime intent explicit.
 
@@ -123,14 +124,14 @@ Exporters consume this model, not collector-specific payloads.
 Implemented:
 
 - `console`
+- `otlp_http`
 
 Declared but not yet implemented:
 
-- `otlp_http`
 - `datadog_native`
 - `newrelic_otlp`
 
-The factory currently fails fast for unimplemented exporters.
+The factory fails fast for unimplemented exporters.
 
 ## How To Add A New Exporter
 

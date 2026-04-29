@@ -15,7 +15,13 @@ class OtlpPayloadMapperTests(unittest.TestCase):
     """Validate canonical metric mapping into OTLP payloads."""
 
     def test_maps_gauge_and_counter(self) -> None:
-        mapper = OtlpPayloadMapper(now_unix_ms=lambda: 1_700_000_000_999)
+        mapper = OtlpPayloadMapper(
+            now_unix_ms=lambda: 1_700_000_000_999,
+            resource_attributes={
+                "host.name": "node-a",
+                "service.name": "heka-insights-agent",
+            },
+        )
         metrics = [
             {
                 "name": "heka_cpu_usage_percent",
@@ -37,6 +43,17 @@ class OtlpPayloadMapperTests(unittest.TestCase):
         ]
 
         payload = mapper.map_metrics(metrics)
+        resource_attributes = payload["resourceMetrics"][0]["resource"]["attributes"]
+        self.assertEqual(
+            resource_attributes,
+            [
+                {"key": "host.name", "value": {"stringValue": "node-a"}},
+                {
+                    "key": "service.name",
+                    "value": {"stringValue": "heka-insights-agent"},
+                },
+            ],
+        )
         mapped = payload["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
 
         gauge = mapped[0]
@@ -90,6 +107,10 @@ class OtlpPayloadMapperTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Unsupported canonical metric type"):
             mapper.map_metrics(metrics)
+
+    def test_rejects_non_string_resource_attributes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "resource_attributes"):
+            OtlpPayloadMapper(resource_attributes={"service.version": 1})  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":
