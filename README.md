@@ -283,7 +283,14 @@ Set values in `./.env`:
 ```env
 LOG_LOCATION=./log/heka_agent.log
 CPU_POLL_INTERVAL_SECONDS=10
-EXPORTER_TYPE=console
+EXPORTER_TYPE=otlp_http
+OTLP_HTTP_ENDPOINT=http://localhost:4318/v1/metrics
+OTLP_HTTP_HEADERS=api-key=replace_me
+OTLP_RESOURCE_ATTRIBUTES=service.name=heka-insights-agent,host.name=localhost
+OTLP_HTTP_TIMEOUT_SECONDS=10
+OTLP_HTTP_RETRY_MAX_ATTEMPTS=5
+OTLP_HTTP_RETRY_INITIAL_BACKOFF_SECONDS=1
+OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS=5
 ```
 
 ### Environment Variables
@@ -308,11 +315,108 @@ Supported values:
 - `datadog_native`
 - `newrelic_otlp`
 
-Current behavior in M3-4:
+Current behavior:
 
 - missing value defaults to `console`
 - unsupported values fail fast at startup with an explicit error
-- configured but unimplemented exporters (`otlp_http`, `datadog_native`, `newrelic_otlp`) fail fast at startup with an explicit error
+- `otlp_http` starts when OTLP config is valid
+- configured but unimplemented exporters (`datadog_native`, `newrelic_otlp`) fail fast at startup with an explicit error
+
+#### `OTLP_HTTP_ENDPOINT`
+
+Required when `EXPORTER_TYPE=otlp_http`. Must be an absolute `http://` or `https://` URL.
+
+#### `OTLP_HTTP_HEADERS`
+
+Optional OTLP request headers in `key=value,key2=value2` format.
+
+#### `OTLP_RESOURCE_ATTRIBUTES`
+
+Optional resource attributes mapped to OTLP `resourceMetrics.resource.attributes` in `key=value,key2=value2` format.
+
+#### `OTLP_HTTP_TIMEOUT_SECONDS`
+
+OTLP HTTP request timeout in seconds. Must be a positive integer.
+
+#### `OTLP_HTTP_RETRY_MAX_ATTEMPTS`
+
+Maximum OTLP send attempts per export call, including the first attempt.
+
+#### `OTLP_HTTP_RETRY_INITIAL_BACKOFF_SECONDS`
+
+Initial retry delay for transient OTLP failures.
+
+#### `OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS`
+
+Maximum retry delay cap for OTLP exponential backoff.
+
+## OTLP Collector Testing
+
+Use the provided collector config file:
+
+- `tests/otel-collector-config.yaml`
+
+Start a local OpenTelemetry Collector with Docker:
+
+```bash
+cd tests
+docker run --rm \
+  -p 4318:4318 \
+  -v "$(pwd)/otel-collector-config.yaml:/etc/otelcol/config.yaml" \
+  otel/opentelemetry-collector-contrib:latest \
+  --config=/etc/otelcol/config.yaml
+```
+
+Notes:
+
+- Use `otel/opentelemetry-collector-contrib:latest` for auth extensions like `bearertokenauth`.
+- If the collector config uses `scheme: "Bearer"` with `header: "key"`, set:
+
+```env
+OTLP_HTTP_HEADERS=key=Bearer abcd1234
+```
+
+- If the collector config uses `scheme: ""`, set:
+
+```env
+OTLP_HTTP_HEADERS=key=abcd1234
+```
+
+Run the agent from repo root in a separate terminal:
+
+```bash
+python src/main.py
+```
+
+### OTLP Integration Tests (Docker)
+
+Integration tests automatically start and stop collector containers using fixture configs under:
+
+- `tests/fixtures/otlp/`
+
+Run only OTLP integration tests:
+
+```bash
+RUN_OTLP_INTEGRATION=1 PYTHONPATH=src python3 -m unittest -v tests.test_otlp_http_integration
+```
+
+Run full suite including integration tests:
+
+```bash
+RUN_OTLP_INTEGRATION=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+Optional image override:
+
+```bash
+OTELCOL_IMAGE=otel/opentelemetry-collector-contrib:latest RUN_OTLP_INTEGRATION=1 PYTHONPATH=src python3 -m unittest -v tests.test_otlp_http_integration
+```
+
+Optional port-base override (tests use `14318`, `14319`, `14320` by default):
+
+```bash
+OTLP_IT_BASE_PORT=15318 RUN_OTLP_INTEGRATION=1 PYTHONPATH=src python3 -m unittest -v tests.test_otlp_http_integration
+```
 
 ## Exporter Lifecycle (M3 Foundation)
 
