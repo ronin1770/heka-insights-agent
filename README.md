@@ -451,6 +451,28 @@ Run full suite including integration tests:
 RUN_OTLP_INTEGRATION=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
+Run New Relic preset integration tests:
+
+```bash
+docker compose -f docker-compose.test.yml run --rm \
+  -e RUN_OTLP_INTEGRATION=1 \
+  -e OTLP_IT_HOST=host.docker.internal \
+  test-runner \
+  pytest -vv -s -rs tests/milestone-5/test_newrelic_otlp_integration.py
+```
+
+Expected result:
+
+```text
+collected 3 items
+
+tests/milestone-5/test_newrelic_otlp_integration.py::NewRelicOtlpIntegrationTests::test_newrelic_preset_injects_api_key_header PASSED
+tests/milestone-5/test_newrelic_otlp_integration.py::NewRelicOtlpIntegrationTests::test_newrelic_preset_overrides_conflicting_otlp_api_key_header PASSED
+tests/milestone-5/test_newrelic_otlp_integration.py::NewRelicOtlpIntegrationTests::test_newrelic_preset_rejects_invalid_api_key_without_retry_for_401 PASSED
+
+3 passed
+```
+
 Optional image override:
 
 ```bash
