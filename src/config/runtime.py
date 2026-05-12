@@ -24,6 +24,11 @@ OTLP_HTTP_RETRY_INITIAL_BACKOFF_SECONDS_ENV_KEY = (
     "OTLP_HTTP_RETRY_INITIAL_BACKOFF_SECONDS"
 )
 OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS_ENV_KEY = "OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS"
+NEWRELIC_OTLP_ENDPOINT_ENV_KEY = "NEWRELIC_OTLP_ENDPOINT"
+NEWRELIC_API_KEY_ENV_KEY = "NEWRELIC_API_KEY"
+NEWRELIC_SERVICE_NAME_ENV_KEY = "NEWRELIC_SERVICE_NAME"
+NEWRELIC_ENVIRONMENT_ENV_KEY = "NEWRELIC_ENVIRONMENT"
+NEWRELIC_HOST_NAME_ENV_KEY = "NEWRELIC_HOST_NAME"
 
 DEFAULT_CPU_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_OTLP_HTTP_TIMEOUT_SECONDS = 10
@@ -180,6 +185,44 @@ def get_otlp_http_retry_max_backoff_seconds(
     )
 
 
+def get_newrelic_otlp_preset(
+    *,
+    logger: logging.Logger | None = None,
+) -> tuple[str, dict[str, str], dict[str, str]]:
+    """Resolve New Relic preset into OTLP endpoint, headers, and resource attributes."""
+    endpoint = _get_required_newrelic_value(
+        env_key=NEWRELIC_OTLP_ENDPOINT_ENV_KEY,
+        logger=logger,
+    )
+    api_key = _get_required_newrelic_value(
+        env_key=NEWRELIC_API_KEY_ENV_KEY,
+        logger=logger,
+    )
+    service_name = _get_required_newrelic_value(
+        env_key=NEWRELIC_SERVICE_NAME_ENV_KEY,
+        logger=logger,
+    )
+
+    headers = {
+        key.lower(): value
+        for key, value in get_otlp_http_headers(logger=logger).items()
+    }
+    headers["api-key"] = api_key
+
+    resource_attributes = get_otlp_resource_attributes(logger=logger)
+    resource_attributes["service.name"] = service_name
+
+    environment = _get_optional_env_value(NEWRELIC_ENVIRONMENT_ENV_KEY)
+    if environment is not None:
+        resource_attributes["deployment.environment"] = environment
+
+    host_name = _get_optional_env_value(NEWRELIC_HOST_NAME_ENV_KEY)
+    if host_name is not None:
+        resource_attributes["host.name"] = host_name
+
+    return endpoint, headers, resource_attributes
+
+
 def _parse_key_value_mapping(
     *,
     env_key: str,
@@ -222,6 +265,30 @@ def _parse_key_value_mapping(
             )
         parsed[key] = value
     return parsed
+
+
+def _get_required_newrelic_value(
+    *,
+    env_key: str,
+    logger: logging.Logger | None,
+) -> str:
+    value = _get_optional_env_value(env_key)
+    if value is not None:
+        return value
+
+    message = (
+        f"{env_key} is required when {EXPORTER_TYPE_ENV_KEY}=newrelic_otlp."
+    )
+    if logger is not None:
+        logger.error(message)
+    raise RuntimeError(message)
+
+
+def _get_optional_env_value(env_key: str) -> str | None:
+    raw_value = os.getenv(env_key, "").strip()
+    if not raw_value:
+        return None
+    return raw_value
 
 
 def _get_positive_int_with_default(
