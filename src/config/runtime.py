@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Literal, cast
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -113,6 +114,11 @@ def get_otlp_http_endpoint(*, logger: logging.Logger | None = None) -> str:
     """Return OTLP HTTP endpoint and fail fast when missing."""
     endpoint = os.getenv(OTLP_HTTP_ENDPOINT_ENV_KEY, "").strip()
     if endpoint:
+        _validate_http_endpoint_value(
+            endpoint=endpoint,
+            env_key=OTLP_HTTP_ENDPOINT_ENV_KEY,
+            logger=logger,
+        )
         return endpoint
 
     message = (
@@ -191,6 +197,11 @@ def get_newrelic_otlp_preset(
 ) -> tuple[str, dict[str, str], dict[str, str]]:
     """Resolve New Relic preset into OTLP endpoint, headers, and resource attributes."""
     endpoint = _get_required_newrelic_value(
+        env_key=NEWRELIC_OTLP_ENDPOINT_ENV_KEY,
+        logger=logger,
+    )
+    _validate_http_endpoint_value(
+        endpoint=endpoint,
         env_key=NEWRELIC_OTLP_ENDPOINT_ENV_KEY,
         logger=logger,
     )
@@ -289,6 +300,26 @@ def _get_optional_env_value(env_key: str) -> str | None:
     if not raw_value:
         return None
     return raw_value
+
+
+def _validate_http_endpoint_value(
+    *,
+    endpoint: str,
+    env_key: str,
+    logger: logging.Logger | None,
+) -> None:
+    parsed = urlparse(endpoint)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return
+
+    _raise_config_error(
+        env_key=env_key,
+        detail=(
+            f"value '{endpoint}' is invalid; "
+            "expected absolute http/https URL."
+        ),
+        logger=logger,
+    )
 
 
 def _get_positive_int_with_default(

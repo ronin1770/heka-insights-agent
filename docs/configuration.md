@@ -32,6 +32,11 @@ Use only one dotenv file:
 | `OTLP_HTTP_RETRY_MAX_ATTEMPTS` | positive integer | `5` | Maximum attempts per export call (includes first attempt) |
 | `OTLP_HTTP_RETRY_INITIAL_BACKOFF_SECONDS` | positive float | `1.0` | Initial retry delay for transient failures |
 | `OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS` | positive float | `5.0` | Upper bound for exponential retry delay |
+| `NEWRELIC_OTLP_ENDPOINT` | absolute URL (`http/https`) | none | Required when `EXPORTER_TYPE=newrelic_otlp`; startup fails if missing/invalid |
+| `NEWRELIC_API_KEY` | string | none | Required when `EXPORTER_TYPE=newrelic_otlp`; injected as `api-key` OTLP header |
+| `NEWRELIC_SERVICE_NAME` | string | none | Required when `EXPORTER_TYPE=newrelic_otlp`; mapped to resource `service.name` |
+| `NEWRELIC_ENVIRONMENT` | string | empty | Optional; mapped to resource `deployment.environment` |
+| `NEWRELIC_HOST_NAME` | string | empty | Optional; mapped to resource `host.name` |
 
 ## Exporter Selector
 
@@ -39,7 +44,7 @@ Use only one dotenv file:
 
 - Missing value: defaults to `console`
 - Unsupported value: startup fails fast with explicit error
-- Configured but unimplemented exporter (`datadog_native`, `newrelic_otlp`): startup fails fast with explicit error
+- Configured but unimplemented exporter (`datadog_native`): startup fails fast with explicit error
 
 ## Exporter Validation Outcomes
 
@@ -48,9 +53,38 @@ Use only one dotenv file:
 | _missing_ | resolves to `console` and starts |
 | `console` | starts with console exporter |
 | `otlp_http` | starts when OTLP config is valid; fails fast when endpoint/key-value settings are invalid |
+| `newrelic_otlp` | starts when New Relic preset config is valid; fails fast when required values are missing/invalid |
 | `datadog_native` | fails fast (`RuntimeError`: exporter not implemented) |
-| `newrelic_otlp` | fails fast (`RuntimeError`: exporter not implemented) |
 | any other value | fails fast (`RuntimeError`: invalid selector value) |
+
+## New Relic Preset Mode
+
+When `EXPORTER_TYPE=newrelic_otlp`, the runtime resolves New Relic settings into OTLP HTTP exporter internals.
+
+Preset behavior:
+
+- `NEWRELIC_OTLP_ENDPOINT` is required and must be an absolute `http://` or `https://` URL.
+- `NEWRELIC_API_KEY` is required and is injected as OTLP header `api-key`.
+- `NEWRELIC_SERVICE_NAME` is required and mapped to `service.name`.
+- `NEWRELIC_ENVIRONMENT` is optional and mapped to `deployment.environment`.
+- `NEWRELIC_HOST_NAME` is optional and mapped to `host.name`.
+- `NEWRELIC_*` values take precedence over conflicting OTLP values in preset mode.
+
+Example:
+
+```env
+EXPORTER_TYPE=newrelic_otlp
+NEWRELIC_OTLP_ENDPOINT=https://otlp.nr-data.net/v1/metrics
+NEWRELIC_API_KEY=<your_license_key>
+NEWRELIC_SERVICE_NAME=heka-insights-agent
+NEWRELIC_ENVIRONMENT=production
+NEWRELIC_HOST_NAME=node-a
+```
+
+Region endpoint examples:
+
+- US: `https://otlp.nr-data.net/v1/metrics`
+- EU: `https://otlp.eu01.nr-data.net/v1/metrics`
 
 ## OTLP Key-Value Format
 
