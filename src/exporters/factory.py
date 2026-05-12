@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from config import ExporterType
+from config import ExporterType, get_newrelic_otlp_preset
 
 from .base import Exporter
 from .console import ConsoleExporter
@@ -21,6 +21,16 @@ def create_exporter(
         return ConsoleExporter()
     if exporter_type == "otlp_http":
         return OtlpHttpExporter(logger=logger)
+    if exporter_type == "newrelic_otlp":
+        endpoint, headers, resource_attributes = get_newrelic_otlp_preset(
+            logger=logger
+        )
+        return OtlpHttpExporter(
+            endpoint=endpoint,
+            headers=headers,
+            resource_attributes=resource_attributes,
+            logger=logger,
+        )
 
     message = (
         f"Exporter '{exporter_type}' is configured but not implemented yet. "

@@ -291,6 +291,12 @@ OTLP_HTTP_TIMEOUT_SECONDS=10
 OTLP_HTTP_RETRY_MAX_ATTEMPTS=5
 OTLP_HTTP_RETRY_INITIAL_BACKOFF_SECONDS=1
 OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS=5
+# New Relic OTLP preset (optional)
+NEWRELIC_OTLP_ENDPOINT=https://otlp.nr-data.net/v1/metrics
+NEWRELIC_API_KEY=replace_with_new_relic_license_key
+NEWRELIC_SERVICE_NAME=heka-insights-agent
+NEWRELIC_ENVIRONMENT=dev
+NEWRELIC_HOST_NAME=localhost
 ```
 
 ### Environment Variables
@@ -320,7 +326,8 @@ Current behavior:
 - missing value defaults to `console`
 - unsupported values fail fast at startup with an explicit error
 - `otlp_http` starts when OTLP config is valid
-- configured but unimplemented exporters (`datadog_native`, `newrelic_otlp`) fail fast at startup with an explicit error
+- `newrelic_otlp` starts when New Relic preset config is valid
+- configured but unimplemented exporters (`datadog_native`) fail fast at startup with an explicit error
 
 #### `OTLP_HTTP_ENDPOINT`
 
@@ -349,6 +356,44 @@ Initial retry delay for transient OTLP failures.
 #### `OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS`
 
 Maximum retry delay cap for OTLP exponential backoff.
+
+#### `NEWRELIC_OTLP_ENDPOINT`
+
+Required when `EXPORTER_TYPE=newrelic_otlp`. Must be an absolute `http://` or `https://` URL.
+
+#### `NEWRELIC_API_KEY`
+
+Required when `EXPORTER_TYPE=newrelic_otlp`. Injected automatically as OTLP header `api-key`.
+
+#### `NEWRELIC_SERVICE_NAME`
+
+Required when `EXPORTER_TYPE=newrelic_otlp`. Mapped to resource attribute `service.name`.
+
+#### `NEWRELIC_ENVIRONMENT`
+
+Optional when `EXPORTER_TYPE=newrelic_otlp`. Mapped to resource attribute `deployment.environment`.
+
+#### `NEWRELIC_HOST_NAME`
+
+Optional when `EXPORTER_TYPE=newrelic_otlp`. Mapped to resource attribute `host.name`.
+
+### New Relic Preset Example
+
+Use this preset to route telemetry to New Relic using OTLP HTTP internals:
+
+```env
+EXPORTER_TYPE=newrelic_otlp
+NEWRELIC_OTLP_ENDPOINT=https://otlp.nr-data.net/v1/metrics
+NEWRELIC_API_KEY=<your_license_key>
+NEWRELIC_SERVICE_NAME=heka-insights-agent
+NEWRELIC_ENVIRONMENT=production
+NEWRELIC_HOST_NAME=node-a
+```
+
+Region endpoint examples:
+
+- US: `https://otlp.nr-data.net/v1/metrics`
+- EU: `https://otlp.eu01.nr-data.net/v1/metrics`
 
 ## OTLP Collector Testing
 
@@ -404,6 +449,28 @@ Run full suite including integration tests:
 
 ```bash
 RUN_OTLP_INTEGRATION=1 PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+Run New Relic preset integration tests:
+
+```bash
+docker compose -f docker-compose.test.yml run --rm \
+  -e RUN_OTLP_INTEGRATION=1 \
+  -e OTLP_IT_HOST=host.docker.internal \
+  test-runner \
+  pytest -vv -s -rs tests/milestone-5/test_newrelic_otlp_integration.py
+```
+
+Expected result:
+
+```text
+collected 3 items
+
+tests/milestone-5/test_newrelic_otlp_integration.py::NewRelicOtlpIntegrationTests::test_newrelic_preset_injects_api_key_header PASSED
+tests/milestone-5/test_newrelic_otlp_integration.py::NewRelicOtlpIntegrationTests::test_newrelic_preset_overrides_conflicting_otlp_api_key_header PASSED
+tests/milestone-5/test_newrelic_otlp_integration.py::NewRelicOtlpIntegrationTests::test_newrelic_preset_rejects_invalid_api_key_without_retry_for_401 PASSED
+
+3 passed
 ```
 
 Optional image override:
