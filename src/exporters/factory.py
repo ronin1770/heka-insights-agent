@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import logging
 
-from config import ExporterType, get_newrelic_otlp_preset
+from config import (
+    ExporterType,
+    get_datadog_otlp_preset,
+    get_newrelic_otlp_preset,
+)
 
 from .base import Exporter
 from .console import ConsoleExporter
+from .datadog_native import DatadogNativeExporter
 from .otlp_http import OtlpHttpExporter
 
 
@@ -21,6 +26,18 @@ def create_exporter(
         return ConsoleExporter()
     if exporter_type == "otlp_http":
         return OtlpHttpExporter(logger=logger)
+    if exporter_type == "datadog_otlp":
+        endpoint, headers, resource_attributes = get_datadog_otlp_preset(
+            logger=logger
+        )
+        return OtlpHttpExporter(
+            endpoint=endpoint,
+            headers=headers,
+            resource_attributes=resource_attributes,
+            logger=logger,
+        )
+    if exporter_type == "datadog_native":
+        return DatadogNativeExporter(logger=logger)
     if exporter_type == "newrelic_otlp":
         endpoint, headers, resource_attributes = get_newrelic_otlp_preset(
             logger=logger
@@ -32,10 +49,7 @@ def create_exporter(
             logger=logger,
         )
 
-    message = (
-        f"Exporter '{exporter_type}' is configured but not implemented yet. "
-        "Set EXPORTER_TYPE=console until this exporter adapter is implemented."
-    )
+    message = f"Unsupported exporter type '{exporter_type}'."
     if logger is not None:
         logger.error(message)
     raise RuntimeError(message)

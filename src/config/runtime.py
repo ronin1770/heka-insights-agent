@@ -30,6 +30,12 @@ NEWRELIC_API_KEY_ENV_KEY = "NEWRELIC_API_KEY"
 NEWRELIC_SERVICE_NAME_ENV_KEY = "NEWRELIC_SERVICE_NAME"
 NEWRELIC_ENVIRONMENT_ENV_KEY = "NEWRELIC_ENVIRONMENT"
 NEWRELIC_HOST_NAME_ENV_KEY = "NEWRELIC_HOST_NAME"
+DATADOG_ENABLED_ENV_KEY = "DATADOG_ENABLED"
+DATADOG_SITE_ENV_KEY = "DATADOG_SITE"
+DATADOG_API_KEY_ENV_KEY = "DATADOG_API_KEY"
+DATADOG_HOSTNAME_ENV_KEY = "DATADOG_HOSTNAME"
+DATADOG_TAGS_ENV_KEY = "DATADOG_TAGS"
+DATADOG_METRIC_PREFIX_ENV_KEY = "DATADOG_METRIC_PREFIX"
 
 DEFAULT_CPU_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_OTLP_HTTP_TIMEOUT_SECONDS = 10
@@ -40,6 +46,7 @@ DEFAULT_OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS = 5.0
 ExporterType = Literal[
     "console",
     "otlp_http",
+    "datadog_otlp",
     "datadog_native",
     "newrelic_otlp",
 ]
@@ -48,9 +55,20 @@ DEFAULT_EXPORTER_TYPE: ExporterType = "console"
 SUPPORTED_EXPORTER_TYPES: tuple[ExporterType, ...] = (
     "console",
     "otlp_http",
+    "datadog_otlp",
     "datadog_native",
     "newrelic_otlp",
 )
+
+_DATADOG_SITE_TO_DOMAIN: dict[str, str] = {
+    "datadoghq.com": "datadoghq.com",
+    "datadoghq.eu": "datadoghq.eu",
+    "us3": "us3.datadoghq.com",
+    "us5": "us5.datadoghq.com",
+    "ap1": "ap1.datadoghq.com",
+    "ap2": "ap2.datadoghq.com",
+    "ddog-gov.com": "ddog-gov.com",
+}
 
 load_dotenv(ENV_FILE, override=False)
 
@@ -234,6 +252,82 @@ def get_newrelic_otlp_preset(
     return endpoint, headers, resource_attributes
 
 
+def get_datadog_enabled(*, logger: logging.Logger | None = None) -> bool:
+    """Return optional Datadog enablement toggle from environment."""
+    raw_value = os.getenv(DATADOG_ENABLED_ENV_KEY, "").strip()
+    if not raw_value:
+        return False
+
+    normalized = raw_value.lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+
+    _raise_config_error(
+        env_key=DATADOG_ENABLED_ENV_KEY,
+        detail=(
+            f"value '{raw_value}' is invalid; expected one of: "
+            "1,true,yes,on,0,false,no,off."
+        ),
+        logger=logger,
+    )
+
+
+def get_datadog_otlp_preset(
+    *,
+    logger: logging.Logger | None = None,
+) -> tuple[str, dict[str, str], dict[str, str]]:
+    """Resolve Datadog OTLP preset into OTLP endpoint, headers, and resource attrs."""
+    domain = _get_datadog_site_domain(logger=logger)
+    api_key = _get_required_datadog_value(
+        env_key=DATADOG_API_KEY_ENV_KEY,
+        logger=logger,
+    )
+
+    endpoint = f"https://otlp.{domain}/v1/metrics"
+    headers = {
+        key.lower(): value
+        for key, value in get_otlp_http_headers(logger=logger).items()
+    }
+    headers["dd-api-key"] = api_key
+
+    resource_attributes = get_otlp_resource_attributes(logger=logger)
+    host_name = _get_optional_env_value(DATADOG_HOSTNAME_ENV_KEY)
+    if host_name is not None:
+        resource_attributes["host.name"] = host_name
+
+    for key, value in _get_datadog_tags_as_resource_attributes(logger=logger).items():
+        resource_attributes[key] = value
+
+    return endpoint, headers, resource_attributes
+
+
+def get_datadog_native_config(
+    *,
+    logger: logging.Logger | None = None,
+) -> tuple[str, str, str | None, list[str], str | None]:
+    """Resolve Datadog native exporter settings."""
+    domain = _get_datadog_site_domain(logger=logger)
+    endpoint = f"https://api.{domain}/api/v1/series"
+    api_key = _get_required_datadog_value(
+        env_key=DATADOG_API_KEY_ENV_KEY,
+        logger=logger,
+    )
+    host_name = _get_optional_env_value(DATADOG_HOSTNAME_ENV_KEY)
+    default_tags = _parse_datadog_tags(logger=logger)
+    metric_prefix = _get_optional_env_value(DATADOG_METRIC_PREFIX_ENV_KEY)
+    if metric_prefix is not None:
+        metric_prefix = metric_prefix.strip(".")
+        if not metric_prefix:
+            _raise_config_error(
+                env_key=DATADOG_METRIC_PREFIX_ENV_KEY,
+                detail="value is empty after trimming dots.",
+                logger=logger,
+            )
+    return endpoint, api_key, host_name, default_tags, metric_prefix
+
+
 def _parse_key_value_mapping(
     *,
     env_key: str,
@@ -278,6 +372,48 @@ def _parse_key_value_mapping(
     return parsed
 
 
+def _parse_datadog_tags(*, logger: logging.Logger | None = None) -> list[str]:
+    """Parse DATADOG_TAGS as a comma-delimited tag list."""
+    raw_value = os.getenv(DATADOG_TAGS_ENV_KEY, "").strip()
+    if not raw_value:
+        return []
+
+    tags: list[str] = []
+    for index, entry in enumerate(raw_value.split(",")):
+        tag = entry.strip()
+        if not tag:
+            _raise_config_error(
+                env_key=DATADOG_TAGS_ENV_KEY,
+                detail=f"contains an empty entry at position {index + 1}.",
+                logger=logger,
+            )
+        tags.append(tag)
+    return tags
+
+
+def _get_datadog_tags_as_resource_attributes(
+    *,
+    logger: logging.Logger | None,
+) -> dict[str, str]:
+    """Map Datadog tags to OTLP resource attributes for preset mode."""
+    attributes: dict[str, str] = {}
+    for tag in _parse_datadog_tags(logger=logger):
+        if ":" in tag:
+            key, value = tag.split(":", 1)
+            key = key.strip()
+            value = value.strip()
+            if not key or not value:
+                _raise_config_error(
+                    env_key=DATADOG_TAGS_ENV_KEY,
+                    detail=f"tag '{tag}' is invalid; expected key:value.",
+                    logger=logger,
+                )
+            attributes[key] = value
+            continue
+        attributes[tag] = "true"
+    return attributes
+
+
 def _get_required_newrelic_value(
     *,
     env_key: str,
@@ -293,6 +429,44 @@ def _get_required_newrelic_value(
     if logger is not None:
         logger.error(message)
     raise RuntimeError(message)
+
+
+def _get_required_datadog_value(
+    *,
+    env_key: str,
+    logger: logging.Logger | None,
+) -> str:
+    value = _get_optional_env_value(env_key)
+    if value is not None:
+        return value
+
+    message = (
+        f"{env_key} is required when {EXPORTER_TYPE_ENV_KEY} is "
+        "datadog_otlp or datadog_native."
+    )
+    if logger is not None:
+        logger.error(message)
+    raise RuntimeError(message)
+
+
+def _get_datadog_site_domain(*, logger: logging.Logger | None) -> str:
+    site = _get_required_datadog_value(
+        env_key=DATADOG_SITE_ENV_KEY,
+        logger=logger,
+    ).lower()
+    domain = _DATADOG_SITE_TO_DOMAIN.get(site)
+    if domain is not None:
+        return domain
+
+    supported_sites = ", ".join(sorted(_DATADOG_SITE_TO_DOMAIN))
+    _raise_config_error(
+        env_key=DATADOG_SITE_ENV_KEY,
+        detail=(
+            f"value '{site}' is unsupported; "
+            f"supported values: {supported_sites}."
+        ),
+        logger=logger,
+    )
 
 
 def _get_optional_env_value(env_key: str) -> str | None:
