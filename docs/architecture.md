@@ -80,7 +80,9 @@ Current startup behavior:
 - Missing `EXPORTER_TYPE` -> defaults to `console`
 - Invalid `EXPORTER_TYPE` value -> fail fast with explicit `RuntimeError`
 - `EXPORTER_TYPE=otlp_http` -> exporter initializes when OTLP endpoint/config is valid
-- Configured but unimplemented exporter (`datadog_native`, `newrelic_otlp`) -> fail fast with explicit `RuntimeError`
+- `EXPORTER_TYPE=datadog_otlp` -> exporter initializes using Datadog preset-derived OTLP endpoint/header
+- `EXPORTER_TYPE=datadog_native` -> exporter initializes using Datadog native endpoint/config
+- `EXPORTER_TYPE=newrelic_otlp` -> exporter initializes using New Relic preset-derived OTLP endpoint/header
 
 This prevents silent fallback behavior and makes runtime intent explicit.
 
@@ -125,13 +127,9 @@ Implemented:
 
 - `console`
 - `otlp_http`
-
-Declared but not yet implemented:
-
+- `datadog_otlp`
 - `datadog_native`
 - `newrelic_otlp`
-
-The factory fails fast for unimplemented exporters.
 
 ## How To Add A New Exporter
 

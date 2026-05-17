@@ -10,7 +10,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from config import get_datadog_native_config, get_otlp_http_timeout_seconds
+from config import (
+    get_cpu_poll_interval_seconds,
+    get_datadog_native_config,
+    get_otlp_http_timeout_seconds,
+)
 
 from .base import CanonicalMetricCollection, Exporter
 
@@ -26,11 +30,13 @@ class DatadogSeriesMapper:
         hostname: str | None = None,
         default_tags: Sequence[str] | None = None,
         metric_prefix: str | None = None,
+        count_interval_seconds: int = 1,
         now_unix_ms: Callable[[], int] | None = None,
     ) -> None:
         self._hostname = hostname
         self._default_tags = list(default_tags or [])
         self._metric_prefix = metric_prefix
+        self._count_interval_seconds = max(1, count_interval_seconds)
         self._now_unix_ms = now_unix_ms or (lambda: int(time.time() * 1000))
 
     def map_metrics(self, metrics: CanonicalMetricCollection) -> dict[str, Any]:
@@ -69,10 +75,10 @@ class DatadogSeriesMapper:
             full_metric_name = metric_name
 
         labels = metric["labels"]
-        tags = self._normalize_tags([
-            *self._default_tags,
-            *self._labels_to_tags(labels),
-        ])
+        tags = self._merge_and_normalize_tags(
+            default_tags=self._default_tags,
+            label_tags=self._labels_to_tags(labels),
+        )
 
         host = self._hostname
         if host is None:
@@ -85,6 +91,8 @@ class DatadogSeriesMapper:
             "points": [[timestamp_seconds, float(metric["value"])]],
             "type": "gauge" if metric["type"] == "gauge" else "count",
         }
+        if mapped["type"] == "count":
+            mapped["interval"] = self._count_interval_seconds
         if host is not None:
             mapped["host"] = host
         if tags:
@@ -112,6 +120,33 @@ class DatadogSeriesMapper:
             normalized.append(trimmed)
             seen.add(trimmed)
         return normalized
+
+    @classmethod
+    def _merge_and_normalize_tags(
+        cls,
+        *,
+        default_tags: Sequence[str],
+        label_tags: Sequence[str],
+    ) -> list[str]:
+        """Merge tags with deterministic key precedence (defaults win)."""
+        tag_by_key: dict[str, str] = {}
+
+        for tag in label_tags:
+            key, value = cls._split_tag(tag)
+            tag_by_key[key] = value
+
+        for tag in default_tags:
+            key, value = cls._split_tag(tag)
+            tag_by_key[key] = value
+
+        merged = [f"{key}:{tag_by_key[key]}" for key in sorted(tag_by_key)]
+        return cls._normalize_tags(merged)
+
+    @staticmethod
+    def _split_tag(tag: str) -> tuple[str, str]:
+        """Split Datadog tag strings into key/value parts."""
+        key, value = tag.split(":", 1)
+        return key.strip(), value.strip()
 
     @staticmethod
     def _validate_metric(metric: Mapping[str, Any], *, index: int) -> None:
@@ -243,6 +278,7 @@ class DatadogNativeExporter(Exporter):
         hostname: str | None = None,
         default_tags: Sequence[str] | None = None,
         metric_prefix: str | None = None,
+        count_interval_seconds: int | None = None,
         mapper: DatadogSeriesMapper | None = None,
         sender: DatadogMetricSender | None = None,
         logger: logging.Logger | None = None,
@@ -252,6 +288,7 @@ class DatadogNativeExporter(Exporter):
         self._hostname = hostname
         self._default_tags = list(default_tags or [])
         self._metric_prefix = metric_prefix
+        self._count_interval_seconds = count_interval_seconds
         self._mapper = mapper
         self._sender = sender
         self._logger = logger
@@ -277,12 +314,16 @@ class DatadogNativeExporter(Exporter):
                 self._default_tags = resolved_default_tags
             if self._metric_prefix is None:
                 self._metric_prefix = resolved_metric_prefix
+        if self._count_interval_seconds is None:
+            poll_interval = get_cpu_poll_interval_seconds(logger=self._logger)
+            self._count_interval_seconds = max(1, int(round(poll_interval)))
 
         if self._mapper is None:
             self._mapper = DatadogSeriesMapper(
                 hostname=self._hostname,
                 default_tags=self._default_tags,
                 metric_prefix=self._metric_prefix,
+                count_interval_seconds=self._count_interval_seconds,
             )
 
         if self._sender is None:
@@ -320,4 +361,5 @@ class DatadogNativeExporter(Exporter):
             "hostname": self._hostname,
             "default_tags_configured": len(self._default_tags),
             "metric_prefix": self._metric_prefix,
+            "count_interval_seconds": self._count_interval_seconds,
         }

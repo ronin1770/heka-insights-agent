@@ -45,7 +45,7 @@ class DatadogExporterTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "DATADOG_SITE": "us5",
+                "DATADOG_SITE": "us5.datadoghq.com",
                 "DATADOG_API_KEY": "dd-api-key-123",
                 "DATADOG_HOSTNAME": "dd-node-a",
                 "DATADOG_TAGS": "env:prod,team:platform",
@@ -76,6 +76,7 @@ class DatadogExporterTests(unittest.TestCase):
             hostname="dd-node-1",
             default_tags=["env:prod"],
             metric_prefix="heka",
+            count_interval_seconds=10,
             sender=sender,
             endpoint="https://api.datadoghq.com/api/v1/series",
             api_key="dd-api-key-123",
@@ -88,7 +89,7 @@ class DatadogExporterTests(unittest.TestCase):
                 "type": "gauge",
                 "unit": "percent",
                 "value": 42.0,
-                "labels": {"service": "agent", "host": "label-host"},
+                "labels": {"service": "agent", "host": "label-host", "env": "staging"},
                 "timestamp_unix_ms": 1_700_000_000_000,
             },
             {
@@ -117,6 +118,7 @@ class DatadogExporterTests(unittest.TestCase):
 
         self.assertEqual(series[1]["metric"], "heka.heka_collections_total")
         self.assertEqual(series[1]["type"], "count")
+        self.assertEqual(series[1]["interval"], 10)
         self.assertEqual(series[1]["points"], [[1_700_000_010, 7.0]])
 
     def test_native_export_uses_label_host_when_hostname_unset(self) -> None:
@@ -143,6 +145,34 @@ class DatadogExporterTests(unittest.TestCase):
 
         payload = sender.payloads[0]
         self.assertEqual(payload["series"][0]["host"], "label-host")
+
+    def test_native_export_uses_cpu_poll_interval_for_count_interval(self) -> None:
+        sender = _SenderStub()
+        metric = {
+            "name": "heka_collections_total",
+            "description": "Collection loop executions.",
+            "type": "counter",
+            "unit": "count",
+            "value": 5,
+            "labels": {"service": "agent"},
+            "timestamp_unix_ms": 1_700_000_000_000,
+        }
+
+        with patch.dict(
+            os.environ,
+            {"CPU_POLL_INTERVAL_SECONDS": "2.6"},
+            clear=True,
+        ):
+            exporter = DatadogNativeExporter(
+                sender=sender,
+                endpoint="https://api.datadoghq.com/api/v1/series",
+                api_key="dd-api-key-123",
+            )
+            exporter.initialize()
+            exporter.export([metric])
+
+        payload = sender.payloads[0]
+        self.assertEqual(payload["series"][0]["interval"], 3)
 
     def test_native_sender_posts_payload_with_api_key_header(self) -> None:
         captured: dict[str, object] = {}

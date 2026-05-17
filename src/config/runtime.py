@@ -60,15 +60,15 @@ SUPPORTED_EXPORTER_TYPES: tuple[ExporterType, ...] = (
     "newrelic_otlp",
 )
 
-_DATADOG_SITE_TO_DOMAIN: dict[str, str] = {
-    "datadoghq.com": "datadoghq.com",
-    "datadoghq.eu": "datadoghq.eu",
-    "us3": "us3.datadoghq.com",
-    "us5": "us5.datadoghq.com",
-    "ap1": "ap1.datadoghq.com",
-    "ap2": "ap2.datadoghq.com",
-    "ddog-gov.com": "ddog-gov.com",
-}
+_DATADOG_ALLOWED_SITES: tuple[str, ...] = (
+    "datadoghq.com",
+    "datadoghq.eu",
+    "us3.datadoghq.com",
+    "us5.datadoghq.com",
+    "ap1.datadoghq.com",
+    "ap2.datadoghq.com",
+    "ddog-gov.com",
+)
 
 load_dotenv(ENV_FILE, override=False)
 
@@ -373,7 +373,7 @@ def _parse_key_value_mapping(
 
 
 def _parse_datadog_tags(*, logger: logging.Logger | None = None) -> list[str]:
-    """Parse DATADOG_TAGS as a comma-delimited tag list."""
+    """Parse DATADOG_TAGS as comma-delimited key:value tags."""
     raw_value = os.getenv(DATADOG_TAGS_ENV_KEY, "").strip()
     if not raw_value:
         return []
@@ -387,7 +387,22 @@ def _parse_datadog_tags(*, logger: logging.Logger | None = None) -> list[str]:
                 detail=f"contains an empty entry at position {index + 1}.",
                 logger=logger,
             )
-        tags.append(tag)
+        if ":" not in tag:
+            _raise_config_error(
+                env_key=DATADOG_TAGS_ENV_KEY,
+                detail=f"tag '{tag}' is invalid; expected key:value.",
+                logger=logger,
+            )
+        key, value = tag.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            _raise_config_error(
+                env_key=DATADOG_TAGS_ENV_KEY,
+                detail=f"tag '{tag}' is invalid; expected key:value.",
+                logger=logger,
+            )
+        tags.append(f"{key}:{value}")
     return tags
 
 
@@ -398,19 +413,8 @@ def _get_datadog_tags_as_resource_attributes(
     """Map Datadog tags to OTLP resource attributes for preset mode."""
     attributes: dict[str, str] = {}
     for tag in _parse_datadog_tags(logger=logger):
-        if ":" in tag:
-            key, value = tag.split(":", 1)
-            key = key.strip()
-            value = value.strip()
-            if not key or not value:
-                _raise_config_error(
-                    env_key=DATADOG_TAGS_ENV_KEY,
-                    detail=f"tag '{tag}' is invalid; expected key:value.",
-                    logger=logger,
-                )
-            attributes[key] = value
-            continue
-        attributes[tag] = "true"
+        key, value = tag.split(":", 1)
+        attributes[key] = value
     return attributes
 
 
@@ -454,11 +458,10 @@ def _get_datadog_site_domain(*, logger: logging.Logger | None) -> str:
         env_key=DATADOG_SITE_ENV_KEY,
         logger=logger,
     ).lower()
-    domain = _DATADOG_SITE_TO_DOMAIN.get(site)
-    if domain is not None:
-        return domain
+    if site in _DATADOG_ALLOWED_SITES:
+        return site
 
-    supported_sites = ", ".join(sorted(_DATADOG_SITE_TO_DOMAIN))
+    supported_sites = ", ".join(sorted(_DATADOG_ALLOWED_SITES))
     _raise_config_error(
         env_key=DATADOG_SITE_ENV_KEY,
         detail=(

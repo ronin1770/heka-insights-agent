@@ -127,7 +127,7 @@ class OtlpRuntimeConfigTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "DATADOG_SITE": "us3",
+                "DATADOG_SITE": "us3.datadoghq.com",
                 "DATADOG_API_KEY": "dd-api-key-123",
                 "DATADOG_HOSTNAME": "dd-node-a",
                 "DATADOG_TAGS": "env:prod,team:platform",
@@ -159,11 +159,11 @@ class OtlpRuntimeConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Invalid DATADOG_SITE"):
                 get_datadog_otlp_preset()
 
-    def test_datadog_native_config_resolves_alias_site(self) -> None:
+    def test_datadog_native_config_resolves_full_domain_site(self) -> None:
         with patch.dict(
             os.environ,
             {
-                "DATADOG_SITE": "ap1",
+                "DATADOG_SITE": "ap1.datadoghq.com",
                 "DATADOG_API_KEY": "dd-api-key-123",
                 "DATADOG_HOSTNAME": "host-1",
                 "DATADOG_TAGS": "env:staging,team:core",
@@ -187,11 +187,23 @@ class OtlpRuntimeConfigTests(unittest.TestCase):
             {
                 "DATADOG_SITE": "datadoghq.com",
                 "DATADOG_API_KEY": "dd-api-key-123",
-                "DATADOG_TAGS": "env:",
+                "DATADOG_TAGS": "env",
             },
             clear=True,
         ):
             with self.assertRaisesRegex(RuntimeError, "Invalid DATADOG_TAGS"):
+                get_datadog_otlp_preset()
+
+    def test_datadog_otlp_preset_rejects_empty_api_key(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "DATADOG_SITE": "datadoghq.com",
+                "DATADOG_API_KEY": "   ",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "DATADOG_API_KEY"):
                 get_datadog_otlp_preset()
 
     def test_parses_retry_configuration(self) -> None:

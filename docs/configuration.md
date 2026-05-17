@@ -24,7 +24,7 @@ Use only one dotenv file:
 |---|---|---|---|
 | `LOG_LOCATION` | string path | none (required) | Startup fails if missing/empty or unwritable |
 | `CPU_POLL_INTERVAL_SECONDS` | float (`> 0`) | `5.0` | Invalid values fall back to default with warning |
-| `EXPORTER_TYPE` | enum | `console` | Supported: `console`, `otlp_http`, `datadog_native`, `newrelic_otlp` |
+| `EXPORTER_TYPE` | enum | `console` | Supported: `console`, `otlp_http`, `datadog_otlp`, `datadog_native`, `newrelic_otlp` |
 | `OTLP_HTTP_ENDPOINT` | absolute URL (`http/https`) | none | Required when `EXPORTER_TYPE=otlp_http`; startup fails if missing/invalid |
 | `OTLP_HTTP_HEADERS` | comma-separated `key=value` pairs | empty | Optional headers added to OTLP HTTP requests; malformed values fail fast |
 | `OTLP_RESOURCE_ATTRIBUTES` | comma-separated `key=value` pairs | empty | Optional attributes mapped to `resourceMetrics.resource.attributes`; malformed values fail fast |
@@ -37,6 +37,11 @@ Use only one dotenv file:
 | `NEWRELIC_SERVICE_NAME` | string | none | Required when `EXPORTER_TYPE=newrelic_otlp`; mapped to resource `service.name` |
 | `NEWRELIC_ENVIRONMENT` | string | empty | Optional; mapped to resource `deployment.environment` |
 | `NEWRELIC_HOST_NAME` | string | empty | Optional; mapped to resource `host.name` |
+| `DATADOG_SITE` | string domain | none | Required when `EXPORTER_TYPE=datadog_otlp` or `datadog_native`; must match allowed Datadog sites |
+| `DATADOG_API_KEY` | string | none | Required when `EXPORTER_TYPE=datadog_otlp` or `datadog_native`; must be non-empty |
+| `DATADOG_HOSTNAME` | string | empty | Optional host override for Datadog exporters |
+| `DATADOG_TAGS` | comma-separated `key:value` pairs | empty | Optional default Datadog tags; malformed values fail fast |
+| `DATADOG_METRIC_PREFIX` | string | empty | Optional Datadog native metric prefix; blank-after-trim fails fast |
 
 ## Exporter Selector
 
@@ -44,7 +49,6 @@ Use only one dotenv file:
 
 - Missing value: defaults to `console`
 - Unsupported value: startup fails fast with explicit error
-- Configured but unimplemented exporter (`datadog_native`): startup fails fast with explicit error
 
 ## Exporter Validation Outcomes
 
@@ -53,8 +57,9 @@ Use only one dotenv file:
 | _missing_ | resolves to `console` and starts |
 | `console` | starts with console exporter |
 | `otlp_http` | starts when OTLP config is valid; fails fast when endpoint/key-value settings are invalid |
+| `datadog_otlp` | starts when Datadog site/API key and tag settings are valid; endpoint and auth header are derived |
+| `datadog_native` | starts when Datadog site/API key and tag settings are valid; native endpoint is derived |
 | `newrelic_otlp` | starts when New Relic preset config is valid; fails fast when required values are missing/invalid |
-| `datadog_native` | fails fast (`RuntimeError`: exporter not implemented) |
 | any other value | fails fast (`RuntimeError`: invalid selector value) |
 
 ## New Relic Preset Mode
@@ -85,6 +90,44 @@ Region endpoint examples:
 
 - US: `https://otlp.nr-data.net/v1/metrics`
 - EU: `https://otlp.eu01.nr-data.net/v1/metrics`
+
+## Datadog Site Validation
+
+When `EXPORTER_TYPE` is `datadog_otlp` or `datadog_native`, `DATADOG_SITE` is required and must be one of:
+
+- `datadoghq.com`
+- `datadoghq.eu`
+- `us3.datadoghq.com`
+- `us5.datadoghq.com`
+- `ap1.datadoghq.com`
+- `ap2.datadoghq.com`
+- `ddog-gov.com`
+
+Invalid or missing values fail fast during startup configuration.
+
+## Datadog OTLP Preset Mode
+
+When `EXPORTER_TYPE=datadog_otlp`, runtime derives OTLP settings from Datadog configuration:
+
+- endpoint: `https://otlp.<DATADOG_SITE>/v1/metrics`
+- auth header: `dd-api-key: <DATADOG_API_KEY>`
+- optional host override: `DATADOG_HOSTNAME` -> `host.name` resource attribute
+- optional `DATADOG_TAGS` are mapped into OTLP resource attributes (`key:value` -> `key=value`)
+
+## Datadog Native Mapping Rules
+
+When `EXPORTER_TYPE=datadog_native`, runtime derives the native endpoint:
+
+- `https://api.<DATADOG_SITE>/api/v1/series`
+
+Mapping behavior:
+
+- canonical `gauge` -> Datadog `gauge`
+- canonical `counter` -> Datadog `count`
+- `timestamp_unix_ms` -> Datadog point timestamp (Unix seconds)
+- `counter` includes `interval` derived from `CPU_POLL_INTERVAL_SECONDS` (rounded, minimum `1`)
+- label tags and default tags are deterministic; `DATADOG_TAGS` override label tags for matching keys
+- `DATADOG_HOSTNAME` overrides host identity from metric labels
 
 ## OTLP Key-Value Format
 

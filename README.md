@@ -318,6 +318,7 @@ Supported values:
 
 - `console`
 - `otlp_http`
+- `datadog_otlp`
 - `datadog_native`
 - `newrelic_otlp`
 
@@ -326,8 +327,9 @@ Current behavior:
 - missing value defaults to `console`
 - unsupported values fail fast at startup with an explicit error
 - `otlp_http` starts when OTLP config is valid
+- `datadog_otlp` starts when Datadog preset config is valid
+- `datadog_native` starts when Datadog native config is valid
 - `newrelic_otlp` starts when New Relic preset config is valid
-- configured but unimplemented exporters (`datadog_native`) fail fast at startup with an explicit error
 
 #### `OTLP_HTTP_ENDPOINT`
 
@@ -376,6 +378,79 @@ Optional when `EXPORTER_TYPE=newrelic_otlp`. Mapped to resource attribute `deplo
 #### `NEWRELIC_HOST_NAME`
 
 Optional when `EXPORTER_TYPE=newrelic_otlp`. Mapped to resource attribute `host.name`.
+
+#### `DATADOG_SITE`
+
+Required when `EXPORTER_TYPE=datadog_otlp` or `EXPORTER_TYPE=datadog_native`.
+Must be one of:
+
+- `datadoghq.com`
+- `datadoghq.eu`
+- `us3.datadoghq.com`
+- `us5.datadoghq.com`
+- `ap1.datadoghq.com`
+- `ap2.datadoghq.com`
+- `ddog-gov.com`
+
+#### `DATADOG_API_KEY`
+
+Required when `EXPORTER_TYPE=datadog_otlp` or `EXPORTER_TYPE=datadog_native`.
+Must be non-empty.
+
+#### `DATADOG_HOSTNAME`
+
+Optional host override for Datadog exporters. If set, it overrides host identity from metric labels.
+
+#### `DATADOG_TAGS`
+
+Optional default tags for Datadog exporters in strict `key:value` format:
+
+```text
+env:prod,team:platform
+```
+
+Tag conflicts are resolved deterministically: configured `DATADOG_TAGS` values override label-derived values for the same tag key.
+
+#### `DATADOG_METRIC_PREFIX`
+
+Optional prefix for Datadog native metrics. If a metric name is already prefixed, it is not prefixed again.
+
+### Datadog OTLP Preset Example
+
+```env
+EXPORTER_TYPE=datadog_otlp
+DATADOG_SITE=us5.datadoghq.com
+DATADOG_API_KEY=<your_datadog_api_key>
+DATADOG_HOSTNAME=node-a
+DATADOG_TAGS=env:prod,team:platform
+```
+
+Derived endpoint:
+
+- `https://otlp.<DATADOG_SITE>/v1/metrics`
+
+### Datadog Native Example
+
+```env
+EXPORTER_TYPE=datadog_native
+DATADOG_SITE=us5.datadoghq.com
+DATADOG_API_KEY=<your_datadog_api_key>
+DATADOG_HOSTNAME=node-a
+DATADOG_TAGS=env:prod,team:platform
+DATADOG_METRIC_PREFIX=heka
+CPU_POLL_INTERVAL_SECONDS=5
+```
+
+Derived endpoint:
+
+- `https://api.<DATADOG_SITE>/api/v1/series`
+
+Datadog native mapping rules:
+
+- canonical `gauge` -> Datadog `gauge`
+- canonical `counter` -> Datadog `count`
+- `timestamp_unix_ms` is converted to Unix seconds
+- `count` metrics include `interval` derived from `CPU_POLL_INTERVAL_SECONDS` (rounded, min 1)
 
 ### New Relic Preset Example
 
