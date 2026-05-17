@@ -129,6 +129,34 @@ Mapping behavior:
 - label tags and default tags are deterministic; `DATADOG_TAGS` override label tags for matching keys
 - `DATADOG_HOSTNAME` overrides host identity from metric labels
 
+## Datadog OTLP vs Datadog Native
+
+Use this section to choose between `datadog_otlp` and `datadog_native`.
+
+| Dimension | `datadog_otlp` | `datadog_native` |
+|---|---|---|
+| Exporter type | `EXPORTER_TYPE=datadog_otlp` | `EXPORTER_TYPE=datadog_native` |
+| Transport endpoint | `https://otlp.<DATADOG_SITE>/v1/metrics` | `https://api.<DATADOG_SITE>/api/v1/series` |
+| Auth header | `dd-api-key` (derived from `DATADOG_API_KEY`) | `DD-API-KEY` (derived from `DATADOG_API_KEY`) |
+| Delivery model | OTLP HTTP exporter internals with Datadog preset | Datadog API v1 native series payload |
+| Mapping control | OTLP mapping with Datadog resource/tag preset behavior | Explicit Datadog series mapping (`gauge`/`count`, `interval`) |
+| Counter interval behavior | OTLP exporter behavior | `count` includes `interval` derived from `CPU_POLL_INTERVAL_SECONDS` |
+| Portability | Higher portability across OTLP-compatible backends | Datadog-specific integration path |
+
+### Choosing Guidance
+
+- Choose `datadog_otlp` when you want OTLP-aligned behavior and better cross-backend portability.
+- Choose `datadog_native` when you want Datadog-specific metric semantics and explicit native series control.
+
+### Shared Datadog Validation
+
+Both modes enforce the same startup validation:
+
+- `DATADOG_SITE` must be an allowed full domain.
+- `DATADOG_API_KEY` must be non-empty.
+- `DATADOG_TAGS` must use strict `key:value` format.
+- `DATADOG_HOSTNAME` overrides label-derived host when provided.
+
 ## OTLP Key-Value Format
 
 `OTLP_HTTP_HEADERS` and `OTLP_RESOURCE_ATTRIBUTES` use this format:

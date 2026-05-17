@@ -452,6 +452,19 @@ Datadog native mapping rules:
 - `timestamp_unix_ms` is converted to Unix seconds
 - `count` metrics include `interval` derived from `CPU_POLL_INTERVAL_SECONDS` (rounded, min 1)
 
+### Datadog OTLP vs Datadog Native
+
+| Dimension | `datadog_otlp` | `datadog_native` |
+|---|---|---|
+| Exporter type | `EXPORTER_TYPE=datadog_otlp` | `EXPORTER_TYPE=datadog_native` |
+| Endpoint | `https://otlp.<DATADOG_SITE>/v1/metrics` | `https://api.<DATADOG_SITE>/api/v1/series` |
+| Delivery style | OTLP HTTP preset | Datadog API v1 native series |
+| Portability | Better for OTLP-aligned workflows | Datadog-specific path |
+| Counter interval | OTLP exporter behavior | Includes `interval` from `CPU_POLL_INTERVAL_SECONDS` |
+
+Use `datadog_otlp` when portability and OTLP consistency matter most.
+Use `datadog_native` when you need Datadog-native metric semantics and explicit series mapping behavior.
+
 ### New Relic Preset Example
 
 Use this preset to route telemetry to New Relic using OTLP HTTP internals:
