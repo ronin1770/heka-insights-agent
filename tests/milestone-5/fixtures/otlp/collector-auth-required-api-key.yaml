@@ -1,0 +1,22 @@
+extensions:
+  bearertokenauth:
+    scheme: api-key
+    token: nr-license-123
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        auth:
+          authenticator: bearertokenauth
+
+exporters:
+  debug:
+
+service:
+  extensions: [bearertokenauth]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [debug]

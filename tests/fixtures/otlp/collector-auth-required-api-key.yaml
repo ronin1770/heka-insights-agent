@@ -1,0 +1,23 @@
+extensions:
+  bearertokenauth/ingress:
+    token: "nr-license-123"
+    header: "api-key"
+    scheme: ""
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+        auth:
+          authenticator: bearertokenauth/ingress
+
+exporters:
+  debug:
+
+service:
+  extensions: [bearertokenauth/ingress]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      exporters: [debug]
