@@ -561,6 +561,20 @@ tests/milestone-5/test_newrelic_otlp_integration.py::NewRelicOtlpIntegrationTest
 3 passed
 ```
 
+Run Datadog milestone-6 live integration tests:
+
+```bash
+docker compose -f docker-compose.test.yml run --rm \
+  -e RUN_OTLP_INTEGRATION=1 \
+  -e RUN_DATADOG_LIVE_INTEGRATION=1 \
+  -e DATADOG_SITE=<datadog_site_full_domain> \
+  -e DATADOG_API_KEY=<datadog_api_key> \
+  test-runner \
+  pytest -vv -s -rs tests/milestone-6/test_datadog_live_integration.py
+```
+
+These tests are gated and skipped by default unless `RUN_DATADOG_LIVE_INTEGRATION=1`.
+
 Optional image override:
 
 ```bash
