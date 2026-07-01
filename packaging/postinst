@@ -1,0 +1,58 @@
+#!/bin/sh
+set -e
+
+SERVICE_USER="heka-agent"
+SERVICE_GROUP="heka-agent"
+SERVICE_NAME="heka-insights-agent.service"
+BINARY_PATH="/usr/local/bin/heka-insights-agent"
+CONFIG_DIR="/etc/heka-insights-agent"
+LOG_DIR="/var/log/heka-insights-agent"
+RESUME_COMMAND="sudo /usr/local/bin/heka-insights-agent setup"
+
+create_service_account() {
+  if ! getent group "${SERVICE_GROUP}" >/dev/null 2>&1; then
+    addgroup --system "${SERVICE_GROUP}"
+  fi
+
+  if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+    adduser \
+      --system \
+      --ingroup "${SERVICE_GROUP}" \
+      --no-create-home \
+      --home /nonexistent \
+      --shell /usr/sbin/nologin \
+      "${SERVICE_USER}"
+  fi
+}
+
+prepare_directories() {
+  install -d -m 0750 -o root -g "${SERVICE_GROUP}" "${CONFIG_DIR}"
+  install -d -m 0750 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${LOG_DIR}"
+}
+
+run_setup_if_possible() {
+  if [ ! -x "${BINARY_PATH}" ]; then
+    echo "You can resume setup using ${RESUME_COMMAND}"
+    return 0
+  fi
+
+  if [ -e /dev/tty ]; then
+    "${BINARY_PATH}" setup </dev/tty >/dev/tty 2>/dev/tty || true
+    return 0
+  fi
+
+  echo "You can resume setup using ${RESUME_COMMAND}"
+}
+
+case "$1" in
+  configure)
+    create_service_account
+    prepare_directories
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload || true
+    fi
+    run_setup_if_possible
+    ;;
+esac
+
+exit 0

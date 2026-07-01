@@ -1,0 +1,23 @@
+#!/bin/sh
+set -e
+
+SERVICE_NAME="heka-insights-agent.service"
+CONFIG_DIR="/etc/heka-insights-agent"
+LOG_DIR="/var/log/heka-insights-agent"
+
+case "$1" in
+  purge)
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    rmdir --ignore-fail-on-non-empty "${CONFIG_DIR}" >/dev/null 2>&1 || true
+    rmdir --ignore-fail-on-non-empty "${LOG_DIR}" >/dev/null 2>&1 || true
+    ;;
+  remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+
+exit 0
