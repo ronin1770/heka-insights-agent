@@ -47,6 +47,46 @@ Linux is the primary target platform.
 
 ---
 
+## Installation
+
+For end users installing the packaged binary from a release artifact:
+
+1. Download `heka-insights-agent_<version>_amd64.deb`
+2. Optionally verify the checksum:
+
+```bash
+sha256sum heka-insights-agent_<version>_amd64.deb
+```
+
+3. Install the package:
+
+```bash
+sudo dpkg -i heka-insights-agent_<version>_amd64.deb
+```
+
+During install, the package:
+
+- creates the `heka-agent` service account
+- prepares `/etc/heka-insights-agent`
+- prepares `/var/log/heka-insights-agent`
+- launches the interactive setup wizard when a terminal is available
+
+If setup is cancelled or skipped, resume it with:
+
+```bash
+sudo /usr/local/bin/heka-insights-agent setup
+```
+
+After setup completes, verify the service:
+
+```bash
+sudo systemctl status heka-insights-agent.service
+```
+
+For packaged runtime configuration details, see `docs/configuration.md`. For release build details, see `docs/release-packaging.md`.
+
+---
+
 ## Current PyPI Dependencies
 
 This project currently uses:
@@ -58,7 +98,7 @@ Install them with:
 
 ```bash
 pip install python-dotenv psutil
-````
+```
 
 Or through the project requirements file:
 

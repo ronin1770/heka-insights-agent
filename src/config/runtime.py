@@ -10,8 +10,15 @@ from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-ENV_FILE = REPO_ROOT / ".env"
+PACKAGE_NAME = "heka-insights-agent"
+SERVICE_NAME = "heka-insights-agent.service"
+SERVICE_USER = "heka-agent"
+SERVICE_GROUP = "heka-agent"
+INSTALLED_BINARY_PATH = Path("/usr/local/bin/heka-insights-agent")
+ENV_DIRECTORY = Path("/etc/heka-insights-agent")
+ENV_FILE = ENV_DIRECTORY / ".env"
+LOG_DIRECTORY = Path("/var/log/heka-insights-agent")
+DEFAULT_LOG_LOCATION = str(LOG_DIRECTORY / "agent.log")
 
 LOG_LOCATION_ENV_KEY = "LOG_LOCATION"
 CPU_POLL_INTERVAL_ENV_KEY = "CPU_POLL_INTERVAL_SECONDS"
@@ -80,7 +87,11 @@ def get_log_location() -> Path:
         raise RuntimeError(f"{LOG_LOCATION_ENV_KEY} is missing or empty.")
 
     env_path = Path(raw_value).expanduser()
-    return env_path if env_path.is_absolute() else (REPO_ROOT / env_path)
+    if not env_path.is_absolute():
+        raise RuntimeError(
+            f"{LOG_LOCATION_ENV_KEY} must be an absolute path for packaged runtime."
+        )
+    return env_path
 
 
 def get_cpu_poll_interval_seconds(
@@ -427,9 +438,7 @@ def _get_required_newrelic_value(
     if value is not None:
         return value
 
-    message = (
-        f"{env_key} is required when {EXPORTER_TYPE_ENV_KEY}=newrelic_otlp."
-    )
+    message = f"{env_key} is required when {EXPORTER_TYPE_ENV_KEY}=newrelic_otlp."
     if logger is not None:
         logger.error(message)
     raise RuntimeError(message)
