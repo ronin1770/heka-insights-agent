@@ -12,7 +12,11 @@ The packaged service does not read repository-root `.env`.
 
 ## Setup Flow
 
-Package install attempts to launch the interactive setup wizard during `dpkg -i`.
+Package install attempts to launch the interactive setup wizard during packaged
+installation:
+
+- Debian / Ubuntu: `sudo dpkg -i heka-insights-agent_<version>_amd64.deb`
+- EL9 RPM: `sudo dnf install -y ./heka-insights-agent-<version>-1.el9.x86_64.rpm`
 
 If setup is cancelled or skipped, resume it with:
 

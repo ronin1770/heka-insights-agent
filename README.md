@@ -36,20 +36,18 @@ Heka Insights Agent aims to provide:
 
 ## Supported Platforms
 
-The agent is intended to work with Linux environments including:
+The agent targets Linux, with packaged release paths currently documented for:
 
-- Debian
-- Ubuntu
-- CentOS
-- Red Hat / RHEL-compatible systems
-
-Linux is the primary target platform.
+- Debian / Ubuntu `amd64`
+- CentOS Stream 9 / RHEL 9 / Rocky Linux 9 / AlmaLinux 9 `x86_64`
 
 ---
 
 ## Installation
 
 For end users installing the packaged binary from a release artifact:
+
+### Debian / Ubuntu
 
 1. Download `heka-insights-agent_<version>_amd64.deb`
 2. Optionally verify the checksum:
@@ -64,7 +62,22 @@ sha256sum heka-insights-agent_<version>_amd64.deb
 sudo dpkg -i heka-insights-agent_<version>_amd64.deb
 ```
 
-During install, the package:
+### CentOS Stream 9 / RHEL 9 / Rocky Linux 9 / AlmaLinux 9
+
+1. Download `heka-insights-agent-<version>-1.el9.x86_64.rpm`
+2. Optionally verify the checksum:
+
+```bash
+sha256sum heka-insights-agent-<version>-1.el9.x86_64.rpm
+```
+
+3. Install the package:
+
+```bash
+sudo dnf install -y ./heka-insights-agent-<version>-1.el9.x86_64.rpm
+```
+
+During install, the packaged release:
 
 - creates the `heka-agent` service account
 - prepares `/etc/heka-insights-agent`
@@ -83,7 +96,9 @@ After setup completes, verify the service:
 sudo systemctl status heka-insights-agent.service
 ```
 
-For packaged runtime configuration details, see `docs/configuration.md`. For release build details, see `docs/release-packaging.md`.
+For packaged runtime configuration details, see `docs/configuration.md`.
+For Debian release build details, see `docs/release-packaging-debian.md`.
+For EL9 RPM release build details, see `docs/release-packaging-rpm.md`.
 
 ---
 

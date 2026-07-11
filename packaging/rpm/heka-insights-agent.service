@@ -1,0 +1,16 @@
+[Unit]
+Description=Heka Insights Agent
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=3
+StartLimitIntervalSec=30
+
+[Service]
+Type=simple
+User=heka-agent
+Group=heka-agent
+ExecStart=/usr/local/bin/heka-insights-agent run
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
