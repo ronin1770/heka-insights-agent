@@ -47,6 +47,11 @@ The agent targets Linux, with packaged release paths currently documented for:
 
 For end users installing the packaged binary from a release artifact:
 
+## Release Build Outputs
+
+- Debian / Ubuntu builds are written to `dist/ubuntu/`
+- CentOS Stream 9 / RHEL 9 / Rocky Linux 9 / AlmaLinux 9 builds are written to `dist/centos9/`
+
 ### Debian / Ubuntu
 
 1. Download `heka-insights-agent_<version>_amd64.deb`
@@ -96,9 +101,11 @@ After setup completes, verify the service:
 sudo systemctl status heka-insights-agent.service
 ```
 
-For packaged runtime configuration details, see `docs/configuration.md`.
-For Debian release build details, see `docs/release-packaging-debian.md`.
-For EL9 RPM release build details, see `docs/release-packaging-rpm.md`.
+## Build Instructions
+
+- Debian / Ubuntu build instructions: `docs/release-packaging-debian.md`
+- CentOS Stream 9 / EL9 RPM build instructions: `docs/release-packaging-rpm.md`
+- Packaged runtime configuration: `docs/configuration.md`
 
 ---
 

@@ -18,8 +18,9 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RPM_ROOT="${REPO_ROOT}/build/rpmbuild"
 SOURCES_DIR="${RPM_ROOT}/SOURCES"
 SPECS_DIR="${RPM_ROOT}/SPECS"
-PYINSTALLER_DIST_DIR="${REPO_ROOT}/dist"
-OUTPUT_DIR="${REPO_ROOT}/dist"
+DIST_ROOT="${REPO_ROOT}/dist"
+PYINSTALLER_DIST_DIR="${DIST_ROOT}"
+OUTPUT_DIR="${DIST_ROOT}/centos9"
 
 rm -rf \
   "${RPM_ROOT}" \
@@ -33,6 +34,7 @@ mkdir -p \
   "${RPM_ROOT}/SRPMS" \
   "${SOURCES_DIR}" \
   "${SPECS_DIR}" \
+  "${DIST_ROOT}" \
   "${OUTPUT_DIR}"
 
 cd "${REPO_ROOT}"
