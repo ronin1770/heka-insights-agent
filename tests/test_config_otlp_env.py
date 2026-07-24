@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from config import (
     get_datadog_native_config,
     get_datadog_otlp_preset,
+    get_heka_intelligence_headers,
     get_newrelic_otlp_preset,
     get_otlp_http_headers,
     get_otlp_resource_attributes,
@@ -57,6 +58,7 @@ class OtlpRuntimeConfigTests(unittest.TestCase):
     def test_returns_empty_mappings_when_unset(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(get_otlp_http_headers(), {})
+            self.assertEqual(get_heka_intelligence_headers(), {})
             self.assertEqual(get_otlp_resource_attributes(), {})
 
     def test_rejects_invalid_key_value_mapping(self) -> None:
@@ -73,6 +75,47 @@ class OtlpRuntimeConfigTests(unittest.TestCase):
                 RuntimeError, "Invalid OTLP_RESOURCE_ATTRIBUTES"
             ):
                 get_otlp_resource_attributes()
+
+    def test_parses_heka_intelligence_headers_when_enabled(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "HEKA_INTELLIGENCE_ENABLED": "true",
+                "HEKA_AGENT_ID": "agt_01JXYZ123",
+                "HEKA_API_KEY": "hek_live_secret_123",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                get_heka_intelligence_headers(),
+                {
+                    "x-agent-id": "agt_01JXYZ123",
+                    "x-api-key": "hek_live_secret_123",
+                },
+            )
+
+    def test_heka_intelligence_headers_reject_missing_required_values(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "HEKA_INTELLIGENCE_ENABLED": "true",
+                "HEKA_API_KEY": "hek_live_secret_123",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HEKA_AGENT_ID"):
+                get_heka_intelligence_headers()
+
+        with patch.dict(
+            os.environ,
+            {
+                "HEKA_INTELLIGENCE_ENABLED": "true",
+                "HEKA_AGENT_ID": "agt_01JXYZ123",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HEKA_API_KEY"):
+                get_heka_intelligence_headers()
 
     def test_parses_newrelic_preset_and_applies_precedence(self) -> None:
         with patch.dict(

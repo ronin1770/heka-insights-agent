@@ -26,6 +26,9 @@ from config import (
     DEFAULT_OTLP_HTTP_RETRY_MAX_ATTEMPTS,
     DEFAULT_OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS,
     DEFAULT_OTLP_HTTP_TIMEOUT_SECONDS,
+    HEKA_AGENT_ID_ENV_KEY,
+    HEKA_API_KEY_ENV_KEY,
+    HEKA_INTELLIGENCE_ENABLED_ENV_KEY,
     ENV_DIRECTORY,
     ENV_FILE,
     EXPORTER_TYPE_ENV_KEY,
@@ -51,6 +54,8 @@ from config import (
 
 _SETUP_CANCEL_WORDS = {"cancel", "quit", "exit"}
 _NEWRELIC_DEFAULT_ENDPOINT = "https://otlp.nr-data.net/v1/metrics"
+_BOOLEAN_TRUE_VALUE = "true"
+_BOOLEAN_FALSE_VALUE = "false"
 
 
 class SetupCancelled(RuntimeError):
@@ -152,6 +157,19 @@ def _collect_otlp_http_values(
         ),
         validate=_validate_non_empty,
     )
+    intelligence_enabled = _prompt_yes_no(
+        label="Use with Heka Insights Intelligence",
+        default=_get_existing_boolean_default(
+            existing_values,
+            key=HEKA_INTELLIGENCE_ENABLED_ENV_KEY,
+            fallback=False,
+        ),
+    )
+    config_values[HEKA_INTELLIGENCE_ENABLED_ENV_KEY] = (
+        _BOOLEAN_TRUE_VALUE if intelligence_enabled else _BOOLEAN_FALSE_VALUE
+    )
+    if intelligence_enabled:
+        _collect_heka_intelligence_values(config_values, existing_values)
     _collect_shared_otlp_values(config_values, existing_values)
 
 
@@ -298,6 +316,22 @@ def _collect_shared_otlp_values(
     )
 
 
+def _collect_heka_intelligence_values(
+    config_values: dict[str, str],
+    existing_values: dict[str, str],
+) -> None:
+    config_values[HEKA_AGENT_ID_ENV_KEY] = _prompt_value(
+        label="Heka agent ID",
+        default=existing_values.get(HEKA_AGENT_ID_ENV_KEY, ""),
+        validate=_validate_non_empty,
+    )
+    config_values[HEKA_API_KEY_ENV_KEY] = _prompt_secret(
+        label="Heka API key",
+        existing_value=existing_values.get(HEKA_API_KEY_ENV_KEY, ""),
+        required=True,
+    )
+
+
 def _prompt_choice(
     *,
     label: str,
@@ -315,6 +349,25 @@ def _prompt_choice(
         default=default,
         validate=validate,
     )
+
+
+def _prompt_yes_no(*, label: str, default: bool) -> bool:
+    default_label = "yes" if default else "no"
+
+    while True:
+        response = input(f"{label} [yes/no] [{default_label}]: ").strip()
+        _raise_if_cancelled(response)
+
+        if not response:
+            return default
+
+        normalized = response.lower()
+        if normalized in {"y", "yes"}:
+            return True
+        if normalized in {"n", "no"}:
+            return False
+
+        sys.stdout.write("Enter yes or no.\n")
 
 
 def _prompt_secret(
@@ -390,6 +443,20 @@ def _validate_positive_float(value: str) -> None:
     parsed = float(value)
     if parsed <= 0:
         raise ValueError("Value must be greater than zero.")
+
+
+def _get_existing_boolean_default(
+    existing_values: dict[str, str],
+    *,
+    key: str,
+    fallback: bool,
+) -> bool:
+    raw_value = existing_values.get(key, "").strip().lower()
+    if raw_value in {"1", "true", "yes", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    return fallback
 
 
 def _load_existing_values() -> dict[str, str]:

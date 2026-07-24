@@ -25,7 +25,10 @@ def create_exporter(
     if exporter_type == "console":
         return ConsoleExporter()
     if exporter_type == "otlp_http":
-        return OtlpHttpExporter(logger=logger)
+        return OtlpHttpExporter(
+            include_heka_intelligence_headers=True,
+            logger=logger,
+        )
     if exporter_type == "datadog_otlp":
         endpoint, headers, resource_attributes = get_datadog_otlp_preset(
             logger=logger
