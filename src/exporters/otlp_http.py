@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from config import (
+    get_heka_intelligence_headers,
     get_otlp_http_endpoint,
     get_otlp_http_headers,
     get_otlp_http_retry_initial_backoff_seconds,
@@ -228,6 +229,7 @@ class OtlpHttpExporter(Exporter):
         sender: OtlpHttpMetricSender | None = None,
         headers: Mapping[str, str] | None = None,
         resource_attributes: Mapping[str, str] | None = None,
+        include_heka_intelligence_headers: bool = False,
         logger: logging.Logger | None = None,
     ) -> None:
         self._endpoint = endpoint
@@ -237,6 +239,7 @@ class OtlpHttpExporter(Exporter):
         self._resource_attributes = (
             dict(resource_attributes) if resource_attributes is not None else None
         )
+        self._include_heka_intelligence_headers = include_heka_intelligence_headers
         self._logger = logger
         self._initialized = False
 
@@ -248,7 +251,12 @@ class OtlpHttpExporter(Exporter):
         resolved_headers = self._headers
         if resolved_headers is None:
             resolved_headers = get_otlp_http_headers(logger=self._logger)
-            self._headers = resolved_headers
+        else:
+            resolved_headers = dict(resolved_headers)
+
+        if self._include_heka_intelligence_headers:
+            resolved_headers.update(get_heka_intelligence_headers(logger=self._logger))
+        self._headers = resolved_headers
 
         resolved_resource_attributes = self._resource_attributes
         if resolved_resource_attributes is None:

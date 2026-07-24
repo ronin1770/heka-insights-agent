@@ -43,6 +43,9 @@ DATADOG_API_KEY_ENV_KEY = "DATADOG_API_KEY"
 DATADOG_HOSTNAME_ENV_KEY = "DATADOG_HOSTNAME"
 DATADOG_TAGS_ENV_KEY = "DATADOG_TAGS"
 DATADOG_METRIC_PREFIX_ENV_KEY = "DATADOG_METRIC_PREFIX"
+HEKA_INTELLIGENCE_ENABLED_ENV_KEY = "HEKA_INTELLIGENCE_ENABLED"
+HEKA_AGENT_ID_ENV_KEY = "HEKA_AGENT_ID"
+HEKA_API_KEY_ENV_KEY = "HEKA_API_KEY"
 
 DEFAULT_CPU_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_OTLP_HTTP_TIMEOUT_SECONDS = 10
@@ -165,6 +168,50 @@ def get_otlp_http_headers(*, logger: logging.Logger | None = None) -> dict[str, 
         env_key=OTLP_HTTP_HEADERS_ENV_KEY,
         logger=logger,
     )
+
+
+def get_heka_intelligence_enabled(*, logger: logging.Logger | None = None) -> bool:
+    """Return whether Heka Intelligence auth headers should be enforced."""
+    raw_value = os.getenv(HEKA_INTELLIGENCE_ENABLED_ENV_KEY, "").strip()
+    if not raw_value:
+        return False
+
+    normalized = raw_value.lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+
+    _raise_config_error(
+        env_key=HEKA_INTELLIGENCE_ENABLED_ENV_KEY,
+        detail=(
+            f"value '{raw_value}' is invalid; expected one of: "
+            "1,true,yes,on,0,false,no,off."
+        ),
+        logger=logger,
+    )
+
+
+def get_heka_intelligence_headers(
+    *,
+    logger: logging.Logger | None = None,
+) -> dict[str, str]:
+    """Return Heka Intelligence OTLP auth headers when enabled."""
+    if not get_heka_intelligence_enabled(logger=logger):
+        return {}
+
+    agent_id = _get_required_heka_intelligence_value(
+        env_key=HEKA_AGENT_ID_ENV_KEY,
+        logger=logger,
+    )
+    api_key = _get_required_heka_intelligence_value(
+        env_key=HEKA_API_KEY_ENV_KEY,
+        logger=logger,
+    )
+    return {
+        "x-agent-id": agent_id,
+        "x-api-key": api_key,
+    }
 
 
 def get_otlp_resource_attributes(
@@ -456,6 +503,24 @@ def _get_required_datadog_value(
     message = (
         f"{env_key} is required when {EXPORTER_TYPE_ENV_KEY} is "
         "datadog_otlp or datadog_native."
+    )
+    if logger is not None:
+        logger.error(message)
+    raise RuntimeError(message)
+
+
+def _get_required_heka_intelligence_value(
+    *,
+    env_key: str,
+    logger: logging.Logger | None,
+) -> str:
+    value = _get_optional_env_value(env_key)
+    if value is not None:
+        return value
+
+    message = (
+        f"{env_key} is required when {EXPORTER_TYPE_ENV_KEY}=otlp_http "
+        f"and {HEKA_INTELLIGENCE_ENABLED_ENV_KEY}=true."
     )
     if logger is not None:
         logger.error(message)

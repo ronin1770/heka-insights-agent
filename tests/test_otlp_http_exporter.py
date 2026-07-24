@@ -102,6 +102,50 @@ class OtlpHttpExporterTests(unittest.TestCase):
             ],
         )
 
+    def test_initialize_merges_heka_intelligence_headers_into_otlp_http_exporter(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OTLP_HTTP_ENDPOINT": "https://collector.example.com/v1/metrics",
+                "OTLP_HTTP_HEADERS": "x-tenant=eng,x-api-key=old-value",
+                "HEKA_INTELLIGENCE_ENABLED": "true",
+                "HEKA_AGENT_ID": "agt_01JXYZ123",
+                "HEKA_API_KEY": "hek_live_secret_123",
+            },
+            clear=True,
+        ):
+            exporter = create_exporter("otlp_http")
+            exporter.initialize()
+
+        self.assertEqual(
+            exporter.health_status(),
+            {
+                "initialized": True,
+                "endpoint": "https://collector.example.com/v1/metrics",
+                "headers_configured": 3,
+                "resource_attributes_configured": 0,
+            },
+        )
+        sender = exporter._sender
+        assert sender is not None
+        self.assertEqual(sender._headers["x-tenant"], "eng")
+        self.assertEqual(sender._headers["x-agent-id"], "agt_01JXYZ123")
+        self.assertEqual(sender._headers["x-api-key"], "hek_live_secret_123")
+
+    def test_initialize_fails_when_heka_intelligence_enabled_without_credentials(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OTLP_HTTP_ENDPOINT": "https://collector.example.com/v1/metrics",
+                "HEKA_INTELLIGENCE_ENABLED": "true",
+                "HEKA_API_KEY": "hek_live_secret_123",
+            },
+            clear=True,
+        ):
+            exporter = create_exporter("otlp_http")
+            with self.assertRaisesRegex(RuntimeError, "HEKA_AGENT_ID"):
+                exporter.initialize()
+
     def test_initialize_fails_on_invalid_otlp_http_headers(self) -> None:
         with patch.dict(
             os.environ,
