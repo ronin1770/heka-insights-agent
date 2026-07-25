@@ -32,6 +32,8 @@ OTLP_HTTP_RETRY_INITIAL_BACKOFF_SECONDS_ENV_KEY = (
     "OTLP_HTTP_RETRY_INITIAL_BACKOFF_SECONDS"
 )
 OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS_ENV_KEY = "OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS"
+OTLP_RETRY_AFTER_DEFAULT_SECONDS_ENV_KEY = "OTLP_RETRY_AFTER_DEFAULT_SECONDS"
+OTLP_RETRY_AFTER_MAX_SECONDS_ENV_KEY = "OTLP_RETRY_AFTER_MAX_SECONDS"
 NEWRELIC_OTLP_ENDPOINT_ENV_KEY = "NEWRELIC_OTLP_ENDPOINT"
 NEWRELIC_API_KEY_ENV_KEY = "NEWRELIC_API_KEY"
 NEWRELIC_SERVICE_NAME_ENV_KEY = "NEWRELIC_SERVICE_NAME"
@@ -52,6 +54,8 @@ DEFAULT_OTLP_HTTP_TIMEOUT_SECONDS = 10
 DEFAULT_OTLP_HTTP_RETRY_MAX_ATTEMPTS = 5
 DEFAULT_OTLP_HTTP_RETRY_INITIAL_BACKOFF_SECONDS = 1.0
 DEFAULT_OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS = 5.0
+DEFAULT_OTLP_RETRY_AFTER_DEFAULT_SECONDS = 5
+DEFAULT_OTLP_RETRY_AFTER_MAX_SECONDS = 300
 
 ExporterType = Literal[
     "console",
@@ -214,6 +218,18 @@ def get_heka_intelligence_headers(
     }
 
 
+def get_heka_agent_id(*, logger: logging.Logger | None = None) -> str | None:
+    """Return the configured Heka agent identifier when present."""
+    del logger
+    return _get_optional_env_value(HEKA_AGENT_ID_ENV_KEY)
+
+
+def get_heka_api_key(*, logger: logging.Logger | None = None) -> str | None:
+    """Return the configured Heka API key when present."""
+    del logger
+    return _get_optional_env_value(HEKA_API_KEY_ENV_KEY)
+
+
 def get_otlp_resource_attributes(
     *,
     logger: logging.Logger | None = None,
@@ -263,6 +279,30 @@ def get_otlp_http_retry_max_backoff_seconds(
     return _get_positive_float_with_default(
         env_key=OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS_ENV_KEY,
         default_value=DEFAULT_OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS,
+        logger=logger,
+    )
+
+
+def get_otlp_retry_after_default_seconds(
+    *,
+    logger: logging.Logger | None = None,
+) -> int:
+    """Return default Retry-After wait seconds for HTTP 429 responses."""
+    return _get_non_negative_int_with_default(
+        env_key=OTLP_RETRY_AFTER_DEFAULT_SECONDS_ENV_KEY,
+        default_value=DEFAULT_OTLP_RETRY_AFTER_DEFAULT_SECONDS,
+        logger=logger,
+    )
+
+
+def get_otlp_retry_after_max_seconds(
+    *,
+    logger: logging.Logger | None = None,
+) -> int:
+    """Return maximum capped Retry-After wait seconds for HTTP 429 responses."""
+    return _get_positive_int_with_default(
+        env_key=OTLP_RETRY_AFTER_MAX_SECONDS_ENV_KEY,
+        default_value=DEFAULT_OTLP_RETRY_AFTER_MAX_SECONDS,
         logger=logger,
     )
 
@@ -612,6 +652,32 @@ def _get_positive_float_with_default(
     try:
         parsed = float(raw_value)
         if parsed > 0:
+            return parsed
+    except ValueError:
+        pass
+
+    _warn_invalid_config_with_default(
+        env_key=env_key,
+        raw_value=raw_value,
+        default_value=default_value,
+        logger=logger,
+    )
+    return default_value
+
+
+def _get_non_negative_int_with_default(
+    *,
+    env_key: str,
+    default_value: int,
+    logger: logging.Logger | None = None,
+) -> int:
+    raw_value = os.getenv(env_key, "").strip()
+    if not raw_value:
+        return default_value
+
+    try:
+        parsed = int(raw_value)
+        if parsed >= 0:
             return parsed
     except ValueError:
         pass

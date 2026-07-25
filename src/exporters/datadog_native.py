@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import threading
 import time
 from typing import Any, Callable, Mapping, Sequence
 from urllib.error import HTTPError, URLError
@@ -13,12 +15,28 @@ from urllib.request import Request, urlopen
 from config import (
     get_cpu_poll_interval_seconds,
     get_datadog_native_config,
+    get_heka_agent_id,
+    get_otlp_http_retry_initial_backoff_seconds,
+    get_otlp_http_retry_max_attempts,
+    get_otlp_http_retry_max_backoff_seconds,
     get_otlp_http_timeout_seconds,
+    get_otlp_retry_after_default_seconds,
+    get_otlp_retry_after_max_seconds,
 )
 
 from .base import CanonicalMetricCollection, Exporter
+from .http_common import (
+    BackgroundPayloadDispatcher,
+    ShutdownRequestedError,
+    SleepFn,
+    mask_identifier,
+    parse_retry_after_delay,
+    sleep_with_shutdown,
+)
 
 _SUPPORTED_CANONICAL_METRIC_TYPES = ("gauge", "counter")
+_RETRYABLE_HTTP_STATUS_CODES = {408, 429}
+_RETRY_BACKOFF_MULTIPLIER = 2.0
 
 
 class DatadogSeriesMapper:
@@ -199,60 +217,322 @@ class DatadogMetricSender:
         endpoint: str,
         api_key: str,
         timeout_seconds: int = 10,
+        retry_max_attempts: int = 5,
+        retry_initial_backoff_seconds: float = 1.0,
+        retry_max_backoff_seconds: float = 5.0,
+        retry_after_default_seconds: int = 5,
+        retry_after_max_seconds: int = 300,
+        agent_id: str | None = None,
         http_client: Callable[..., Any] | None = None,
+        sleep_fn: SleepFn | None = None,
+        shutdown_event: threading.Event | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._endpoint = endpoint.strip()
         self._api_key = api_key
         self._timeout_seconds = timeout_seconds
+        self._retry_max_attempts = retry_max_attempts
+        self._retry_initial_backoff_seconds = retry_initial_backoff_seconds
+        self._retry_max_backoff_seconds = max(
+            retry_max_backoff_seconds,
+            retry_initial_backoff_seconds,
+        )
+        self._retry_after_default_seconds = retry_after_default_seconds
+        self._retry_after_max_seconds = max(
+            retry_after_max_seconds,
+            retry_after_default_seconds,
+        )
+        self._agent_id = agent_id
         self._http_client = http_client or urlopen
+        self._sleep_fn = sleep_fn
+        self._shutdown_event = shutdown_event or threading.Event()
         self._logger = logger
+        self._validate_retry_policy()
         self._validate_endpoint()
 
     def send(self, payload: Mapping[str, Any]) -> None:
         """POST a Datadog metrics payload."""
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        asyncio.run(self._send_async(body))
+
+    async def _send_async(self, body: bytes) -> None:
+        batch_started = time.monotonic()
+        masked_agent_id = mask_identifier(self._agent_id)
+        self._ensure_agent_id_configured(masked_agent_id=masked_agent_id)
+
+        for attempt in range(1, self._retry_max_attempts + 1):
+            if self._shutdown_event.is_set():
+                raise ShutdownRequestedError(
+                    "Shutdown requested before Datadog native export."
+                )
+
+            request = self._build_request(body)
+            request_started = time.monotonic()
+            try:
+                with self._http_client(request, timeout=self._timeout_seconds) as response:
+                    status_code = getattr(response, "status", None)
+                    if status_code is None:
+                        status_code = response.getcode()
+                    request_ms = (time.monotonic() - request_started) * 1000.0
+                    response_headers = getattr(response, "headers", None)
+                    if status_code >= 200 and status_code < 300:
+                        self._logger_info(
+                            "Datadog native export completed; endpoint=%s status=%s "
+                            "attempt=%s retry_request_ms=%.3f total_batch_export_ms=%.3f "
+                            "x_agent_id=%s",
+                            self._endpoint,
+                            status_code,
+                            attempt,
+                            request_ms,
+                            (time.monotonic() - batch_started) * 1000.0,
+                            masked_agent_id,
+                        )
+                        return
+                    if await self._handle_http_failure(
+                        status_code=status_code,
+                        headers=response_headers,
+                        attempt=attempt,
+                        request_ms=request_ms,
+                        batch_started=batch_started,
+                        masked_agent_id=masked_agent_id,
+                    ):
+                        continue
+                    raise RuntimeError(
+                        "Datadog native export failed with non-success status code "
+                        f"{status_code}."
+                    )
+            except HTTPError as exc:
+                request_ms = (time.monotonic() - request_started) * 1000.0
+                if await self._handle_http_error(
+                    exc=exc,
+                    attempt=attempt,
+                    request_ms=request_ms,
+                    batch_started=batch_started,
+                    masked_agent_id=masked_agent_id,
+                ):
+                    continue
+                raise RuntimeError(
+                    f"Datadog native export failed with HTTP error {exc.code}: "
+                    f"{exc.reason}."
+                ) from exc
+            except URLError as exc:
+                request_ms = (time.monotonic() - request_started) * 1000.0
+                if self._should_retry(status_code=None, attempt=attempt):
+                    self._log_retry(
+                        status_code="transport",
+                        attempt=attempt,
+                        request_ms=request_ms,
+                        reason=f"transport_error={exc.reason}",
+                        masked_agent_id=masked_agent_id,
+                    )
+                    await self._sleep_before_retry(attempt=attempt)
+                    continue
+                self._logger_debug(
+                    "Datadog native export failed; endpoint=%s status=transport attempt=%s "
+                    "max_attempts=%s retry_request_ms=%.3f total_batch_export_ms=%.3f "
+                    "x_agent_id=%s error=%s",
+                    self._endpoint,
+                    attempt,
+                    self._retry_max_attempts,
+                    request_ms,
+                    (time.monotonic() - batch_started) * 1000.0,
+                    masked_agent_id,
+                    exc.reason,
+                )
+                raise RuntimeError(
+                    f"Datadog native export failed to reach endpoint '{self._endpoint}': "
+                    f"{exc.reason}."
+                ) from exc
+
+    def _build_request(self, body: bytes) -> Request:
         request = Request(url=self._endpoint, data=body, method="POST")
         request.add_header("Content-Type", "application/json")
         request.add_header("Accept", "application/json")
         request.add_header("DD-API-KEY", self._api_key)
+        if self._agent_id is not None:
+            request.add_header("x-agent-id", self._agent_id)
+        return request
 
-        try:
-            with self._http_client(request, timeout=self._timeout_seconds) as response:
-                status_code = getattr(response, "status", None)
-                if status_code is None:
-                    status_code = response.getcode()
-                if status_code >= 200 and status_code < 300:
-                    return
-                self._logger_debug(
-                    "Datadog native request failed for endpoint '%s' (status=%s).",
-                    self._endpoint,
-                    status_code,
-                )
-                raise RuntimeError(
-                    "Datadog native export failed with non-success status code "
-                    f"{status_code}."
-                )
-        except HTTPError as exc:
-            self._logger_debug(
-                "Datadog native request failed for endpoint '%s' (status=%s).",
-                self._endpoint,
-                exc.code,
+    async def _handle_http_failure(
+        self,
+        *,
+        status_code: int,
+        headers: Mapping[str, Any] | None,
+        attempt: int,
+        request_ms: float,
+        batch_started: float,
+        masked_agent_id: str,
+    ) -> bool:
+        if status_code == 429 and self._should_retry(status_code=status_code, attempt=attempt):
+            await self._sleep_for_retry_after(
+                headers=headers,
+                attempt=attempt,
+                request_ms=request_ms,
+                batch_started=batch_started,
+                masked_agent_id=masked_agent_id,
             )
-            raise RuntimeError(
-                f"Datadog native export failed with HTTP error {exc.code}: "
-                f"{exc.reason}."
-            ) from exc
-        except URLError as exc:
-            self._logger_debug(
-                "Datadog native request failed for endpoint '%s': %s",
-                self._endpoint,
-                exc.reason,
+            return True
+
+        if self._should_retry(status_code=status_code, attempt=attempt):
+            self._log_retry(
+                status_code=status_code,
+                attempt=attempt,
+                request_ms=request_ms,
+                reason=f"http_status={status_code}",
+                masked_agent_id=masked_agent_id,
             )
-            raise RuntimeError(
-                f"Datadog native export failed to reach endpoint '{self._endpoint}': "
-                f"{exc.reason}."
-            ) from exc
+            await self._sleep_before_retry(attempt=attempt)
+            return True
+
+        self._logger_debug(
+            "Datadog native export failed; endpoint=%s status=%s attempt=%s max_attempts=%s "
+            "retry_request_ms=%.3f total_batch_export_ms=%.3f x_agent_id=%s",
+            self._endpoint,
+            status_code,
+            attempt,
+            self._retry_max_attempts,
+            request_ms,
+            (time.monotonic() - batch_started) * 1000.0,
+            masked_agent_id,
+        )
+        return False
+
+    async def _handle_http_error(
+        self,
+        *,
+        exc: HTTPError,
+        attempt: int,
+        request_ms: float,
+        batch_started: float,
+        masked_agent_id: str,
+    ) -> bool:
+        if exc.code == 429 and self._should_retry(status_code=exc.code, attempt=attempt):
+            await self._sleep_for_retry_after(
+                headers=exc.headers,
+                attempt=attempt,
+                request_ms=request_ms,
+                batch_started=batch_started,
+                masked_agent_id=masked_agent_id,
+            )
+            return True
+
+        if self._should_retry(status_code=exc.code, attempt=attempt):
+            self._log_retry(
+                status_code=exc.code,
+                attempt=attempt,
+                request_ms=request_ms,
+                reason=f"http_status={exc.code}",
+                masked_agent_id=masked_agent_id,
+            )
+            await self._sleep_before_retry(attempt=attempt)
+            return True
+
+        self._logger_debug(
+            "Datadog native export failed; endpoint=%s status=%s attempt=%s max_attempts=%s "
+            "retry_request_ms=%.3f total_batch_export_ms=%.3f x_agent_id=%s",
+            self._endpoint,
+            exc.code,
+            attempt,
+            self._retry_max_attempts,
+            request_ms,
+            (time.monotonic() - batch_started) * 1000.0,
+            masked_agent_id,
+        )
+        return False
+
+    def _should_retry(self, *, status_code: int | None, attempt: int) -> bool:
+        if attempt >= self._retry_max_attempts:
+            return False
+        if status_code is None:
+            return True
+        if status_code in _RETRYABLE_HTTP_STATUS_CODES:
+            return True
+        return 500 <= status_code <= 599
+
+    async def _sleep_before_retry(self, *, attempt: int) -> None:
+        backoff_seconds = min(
+            self._retry_max_backoff_seconds,
+            self._retry_initial_backoff_seconds
+            * (_RETRY_BACKOFF_MULTIPLIER ** (attempt - 1)),
+        )
+        await sleep_with_shutdown(
+            seconds=backoff_seconds,
+            shutdown_event=self._shutdown_event,
+            sleep_fn=self._sleep_fn,
+        )
+
+    async def _sleep_for_retry_after(
+        self,
+        *,
+        headers: Mapping[str, Any] | None,
+        attempt: int,
+        request_ms: float,
+        batch_started: float,
+        masked_agent_id: str,
+    ) -> None:
+        retry_after = parse_retry_after_delay(
+            headers=headers,
+            default_seconds=self._retry_after_default_seconds,
+            max_seconds=self._retry_after_max_seconds,
+        )
+        self._logger_warning(
+            "Datadog native export rate limited; endpoint=%s status=429 attempt=%s "
+            "max_attempts=%s retry_after_seconds=%s retry_after_source=%s "
+            "retry_after_default_used=%s retry_after_capped=%s retry_after_parse_ms=%.3f "
+            "retry_after_sleep_seconds=%s retry_request_ms=%.3f total_batch_export_ms=%.3f "
+            "x_agent_id=%s",
+            self._endpoint,
+            attempt,
+            self._retry_max_attempts,
+            retry_after.seconds,
+            retry_after.source,
+            retry_after.default_used,
+            retry_after.capped,
+            retry_after.parse_ms,
+            retry_after.seconds,
+            request_ms,
+            (time.monotonic() - batch_started) * 1000.0,
+            masked_agent_id,
+        )
+        await sleep_with_shutdown(
+            seconds=retry_after.seconds,
+            shutdown_event=self._shutdown_event,
+            sleep_fn=self._sleep_fn,
+        )
+
+    def _log_retry(
+        self,
+        *,
+        status_code: int | str,
+        attempt: int,
+        request_ms: float,
+        reason: str,
+        masked_agent_id: str,
+    ) -> None:
+        self._logger_debug(
+            "Datadog native export retry scheduled; endpoint=%s status=%s attempt=%s "
+            "max_attempts=%s retry_request_ms=%.3f next_attempt=%s reason=%s x_agent_id=%s",
+            self._endpoint,
+            status_code,
+            attempt,
+            self._retry_max_attempts,
+            request_ms,
+            attempt + 1,
+            reason,
+            masked_agent_id,
+        )
+
+    def _ensure_agent_id_configured(self, *, masked_agent_id: str) -> None:
+        if self._agent_id:
+            return
+        self._logger_error(
+            "Datadog native export skipped; endpoint=%s status=not_sent attempt=0 "
+            "max_attempts=%s x_agent_id=%s error=missing_x_agent_id",
+            self._endpoint,
+            self._retry_max_attempts,
+            masked_agent_id,
+        )
+        raise RuntimeError("Datadog native export missing x-agent-id; batch not dispatched.")
 
     def _validate_endpoint(self) -> None:
         parsed = urlparse(self._endpoint)
@@ -262,9 +542,46 @@ class DatadogMetricSender:
                 "Expected absolute http/https URL."
             )
 
+    def _validate_retry_policy(self) -> None:
+        if self._timeout_seconds <= 0:
+            raise RuntimeError("Datadog native timeout_seconds must be greater than zero.")
+        if self._retry_max_attempts <= 0:
+            raise RuntimeError(
+                "Datadog native retry_max_attempts must be greater than zero."
+            )
+        if self._retry_initial_backoff_seconds <= 0:
+            raise RuntimeError(
+                "Datadog native retry_initial_backoff_seconds must be greater than zero."
+            )
+        if self._retry_max_backoff_seconds <= 0:
+            raise RuntimeError(
+                "Datadog native retry_max_backoff_seconds must be greater than zero."
+            )
+        if self._retry_after_default_seconds < 0:
+            raise RuntimeError(
+                "Datadog native retry_after_default_seconds must be greater than or "
+                "equal to zero."
+            )
+        if self._retry_after_max_seconds <= 0:
+            raise RuntimeError(
+                "Datadog native retry_after_max_seconds must be greater than zero."
+            )
+
     def _logger_debug(self, message: str, *args: Any) -> None:
         if self._logger is not None:
             self._logger.debug(message, *args)
+
+    def _logger_info(self, message: str, *args: Any) -> None:
+        if self._logger is not None:
+            self._logger.info(message, *args)
+
+    def _logger_warning(self, message: str, *args: Any) -> None:
+        if self._logger is not None:
+            self._logger.warning(message, *args)
+
+    def _logger_error(self, message: str, *args: Any) -> None:
+        if self._logger is not None:
+            self._logger.error(message, *args)
 
 
 class DatadogNativeExporter(Exporter):
@@ -281,6 +598,7 @@ class DatadogNativeExporter(Exporter):
         count_interval_seconds: int | None = None,
         mapper: DatadogSeriesMapper | None = None,
         sender: DatadogMetricSender | None = None,
+        background_dispatch: bool = True,
         logger: logging.Logger | None = None,
     ) -> None:
         self._endpoint = endpoint
@@ -291,6 +609,9 @@ class DatadogNativeExporter(Exporter):
         self._count_interval_seconds = count_interval_seconds
         self._mapper = mapper
         self._sender = sender
+        self._background_dispatch = background_dispatch
+        self._dispatch_worker: BackgroundPayloadDispatcher | None = None
+        self._dispatch_shutdown_event: threading.Event | None = None
         self._logger = logger
         self._initialized = False
 
@@ -328,10 +649,43 @@ class DatadogNativeExporter(Exporter):
 
         if self._sender is None:
             timeout_seconds = get_otlp_http_timeout_seconds(logger=self._logger)
+            retry_max_attempts = get_otlp_http_retry_max_attempts(logger=self._logger)
+            retry_initial_backoff_seconds = (
+                get_otlp_http_retry_initial_backoff_seconds(logger=self._logger)
+            )
+            retry_max_backoff_seconds = get_otlp_http_retry_max_backoff_seconds(
+                logger=self._logger
+            )
+            retry_after_default_seconds = get_otlp_retry_after_default_seconds(
+                logger=self._logger
+            )
+            retry_after_max_seconds = get_otlp_retry_after_max_seconds(
+                logger=self._logger
+            )
+            self._dispatch_shutdown_event = threading.Event()
             self._sender = DatadogMetricSender(
                 endpoint=self._endpoint,
                 api_key=self._api_key,
                 timeout_seconds=timeout_seconds,
+                retry_max_attempts=retry_max_attempts,
+                retry_initial_backoff_seconds=retry_initial_backoff_seconds,
+                retry_max_backoff_seconds=retry_max_backoff_seconds,
+                retry_after_default_seconds=retry_after_default_seconds,
+                retry_after_max_seconds=retry_after_max_seconds,
+                agent_id=get_heka_agent_id(logger=self._logger),
+                shutdown_event=self._dispatch_shutdown_event,
+                logger=self._logger,
+            )
+        elif self._dispatch_shutdown_event is None:
+            self._dispatch_shutdown_event = threading.Event()
+
+        if self._background_dispatch and self._sender is not None:
+            if self._dispatch_shutdown_event is None:
+                self._dispatch_shutdown_event = threading.Event()
+            self._dispatch_worker = BackgroundPayloadDispatcher(
+                sender=self._sender,
+                worker_name="datadog-native-export",
+                shutdown_event=self._dispatch_shutdown_event,
                 logger=self._logger,
             )
 
@@ -347,10 +701,15 @@ class DatadogNativeExporter(Exporter):
             raise RuntimeError("DatadogNativeExporter sender is not initialized.")
 
         payload = self._mapper.map_metrics(metrics)
+        if self._dispatch_worker is not None:
+            self._dispatch_worker.submit(payload)
+            return
         self._sender.send(payload)
 
     def shutdown(self) -> None:
         """Release exporter resources."""
+        if self._dispatch_worker is not None:
+            self._dispatch_worker.shutdown()
         self._initialized = False
 
     def health_status(self) -> dict[str, Any] | None:

@@ -11,8 +11,11 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from config import (
+    DEFAULT_OTLP_RETRY_AFTER_DEFAULT_SECONDS,
+    DEFAULT_OTLP_RETRY_AFTER_MAX_SECONDS,
     get_datadog_native_config,
     get_datadog_otlp_preset,
+    get_heka_agent_id,
     get_heka_intelligence_headers,
     get_newrelic_otlp_preset,
     get_otlp_http_headers,
@@ -27,6 +30,8 @@ from config import (
     get_otlp_http_retry_max_attempts,
     get_otlp_http_retry_max_backoff_seconds,
     get_otlp_http_timeout_seconds,
+    get_otlp_retry_after_default_seconds,
+    get_otlp_retry_after_max_seconds,
 )
 
 
@@ -57,6 +62,7 @@ class OtlpRuntimeConfigTests(unittest.TestCase):
 
     def test_returns_empty_mappings_when_unset(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(get_heka_agent_id())
             self.assertEqual(get_otlp_http_headers(), {})
             self.assertEqual(get_heka_intelligence_headers(), {})
             self.assertEqual(get_otlp_resource_attributes(), {})
@@ -257,6 +263,8 @@ class OtlpRuntimeConfigTests(unittest.TestCase):
                 "OTLP_HTTP_RETRY_MAX_ATTEMPTS": "4",
                 "OTLP_HTTP_RETRY_INITIAL_BACKOFF_SECONDS": "0.5",
                 "OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS": "6",
+                "OTLP_RETRY_AFTER_DEFAULT_SECONDS": "9",
+                "OTLP_RETRY_AFTER_MAX_SECONDS": "120",
             },
             clear=True,
         ):
@@ -264,6 +272,8 @@ class OtlpRuntimeConfigTests(unittest.TestCase):
             self.assertEqual(get_otlp_http_retry_max_attempts(), 4)
             self.assertEqual(get_otlp_http_retry_initial_backoff_seconds(), 0.5)
             self.assertEqual(get_otlp_http_retry_max_backoff_seconds(), 6.0)
+            self.assertEqual(get_otlp_retry_after_default_seconds(), 9)
+            self.assertEqual(get_otlp_retry_after_max_seconds(), 120)
 
     def test_invalid_retry_configuration_falls_back_to_defaults(self) -> None:
         with patch.dict(
@@ -273,6 +283,8 @@ class OtlpRuntimeConfigTests(unittest.TestCase):
                 "OTLP_HTTP_RETRY_MAX_ATTEMPTS": "-1",
                 "OTLP_HTTP_RETRY_INITIAL_BACKOFF_SECONDS": "bad",
                 "OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS": "",
+                "OTLP_RETRY_AFTER_DEFAULT_SECONDS": "-2",
+                "OTLP_RETRY_AFTER_MAX_SECONDS": "bad",
             },
             clear=True,
         ):
@@ -291,6 +303,14 @@ class OtlpRuntimeConfigTests(unittest.TestCase):
             self.assertEqual(
                 get_otlp_http_retry_max_backoff_seconds(),
                 DEFAULT_OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS,
+            )
+            self.assertEqual(
+                get_otlp_retry_after_default_seconds(),
+                DEFAULT_OTLP_RETRY_AFTER_DEFAULT_SECONDS,
+            )
+            self.assertEqual(
+                get_otlp_retry_after_max_seconds(),
+                DEFAULT_OTLP_RETRY_AFTER_MAX_SECONDS,
             )
 
 

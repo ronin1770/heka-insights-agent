@@ -64,7 +64,10 @@ def run_collectors_loop(
             },
             timestamp_unix_ms=int(time.time() * 1000),
         )
-        exporter.export(canonical_metrics)
+        try:
+            exporter.export(canonical_metrics)
+        except RuntimeError as exc:
+            logger.error("Batch export failed; error=%s", exc)
         ticker.sleep()
 
 

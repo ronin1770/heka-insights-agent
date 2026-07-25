@@ -28,8 +28,9 @@ class _SenderStub:
 
 
 class _FakeResponse:
-    def __init__(self, *, status: int) -> None:
+    def __init__(self, *, status: int, headers: dict[str, str] | None = None) -> None:
         self.status = status
+        self.headers = headers or {}
 
     def __enter__(self) -> "_FakeResponse":
         return self
@@ -40,6 +41,13 @@ class _FakeResponse:
 
 class DatadogExporterTests(unittest.TestCase):
     """Validate Datadog exporter paths and request formation."""
+
+    @staticmethod
+    def _async_sleep_recorder(target: list[float]):
+        async def _sleep(seconds: float) -> None:
+            target.append(seconds)
+
+        return _sleep
 
     def test_factory_creates_datadog_otlp_exporter_with_derived_endpoint(self) -> None:
         with patch.dict(
@@ -80,6 +88,7 @@ class DatadogExporterTests(unittest.TestCase):
             sender=sender,
             endpoint="https://api.datadoghq.com/api/v1/series",
             api_key="dd-api-key-123",
+            background_dispatch=False,
         )
 
         metrics = [
@@ -128,6 +137,7 @@ class DatadogExporterTests(unittest.TestCase):
             sender=sender,
             endpoint="https://api.datadoghq.com/api/v1/series",
             api_key="dd-api-key-123",
+            background_dispatch=False,
         )
 
         metric = {
@@ -167,6 +177,7 @@ class DatadogExporterTests(unittest.TestCase):
                 sender=sender,
                 endpoint="https://api.datadoghq.com/api/v1/series",
                 api_key="dd-api-key-123",
+                background_dispatch=False,
             )
             exporter.initialize()
             exporter.export([metric])
@@ -185,6 +196,7 @@ class DatadogExporterTests(unittest.TestCase):
         sender = DatadogMetricSender(
             endpoint="https://api.datadoghq.com/api/v1/series",
             api_key="dd-api-key-123",
+            agent_id="agt_01JXYZ123",
             timeout_seconds=9,
             http_client=fake_http_client,
         )
@@ -206,6 +218,7 @@ class DatadogExporterTests(unittest.TestCase):
         headers = {key.lower(): value for key, value in request.header_items()}
         self.assertEqual(captured["timeout"], 9)
         self.assertEqual(headers["dd-api-key"], "dd-api-key-123")
+        self.assertEqual(headers["x-agent-id"], "agt_01JXYZ123")
         self.assertEqual(json.loads(request.data.decode("utf-8")), payload)
 
     def test_native_sender_raises_on_non_success_status(self) -> None:
@@ -213,6 +226,7 @@ class DatadogExporterTests(unittest.TestCase):
         sender = DatadogMetricSender(
             endpoint="https://api.datadoghq.com/api/v1/series",
             api_key="dd-api-key-123",
+            agent_id="agt_01JXYZ123",
             http_client=lambda request, timeout: _FakeResponse(status=500),
             logger=logger,
         )
@@ -220,6 +234,39 @@ class DatadogExporterTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "non-success status code 500"):
             sender.send({"series": []})
         logger.debug.assert_called_once()
+
+    def test_native_sender_retries_429_with_same_payload_and_agent_id(self) -> None:
+        sleeps: list[float] = []
+        requests: list[tuple[bytes, dict[str, str]]] = []
+        responses = [
+            _FakeResponse(status=429, headers={"Retry-After": "2"}),
+            _FakeResponse(status=202),
+        ]
+
+        def fake_http_client(request, timeout):
+            del timeout
+            requests.append(
+                (
+                    request.data,
+                    {key.lower(): value for key, value in request.header_items()},
+                )
+            )
+            return responses[len(requests) - 1]
+
+        sender = DatadogMetricSender(
+            endpoint="https://api.datadoghq.com/api/v1/series",
+            api_key="dd-api-key-123",
+            agent_id="agt_01JXYZ123",
+            retry_max_attempts=3,
+            http_client=fake_http_client,
+            sleep_fn=self._async_sleep_recorder(sleeps),
+        )
+        sender.send({"series": []})
+
+        self.assertEqual(sleeps, [2])
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0][0], requests[1][0])
+        self.assertEqual(requests[0][1]["x-agent-id"], requests[1][1]["x-agent-id"])
 
 
 if __name__ == "__main__":

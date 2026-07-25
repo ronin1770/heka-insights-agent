@@ -11,12 +11,14 @@ from urllib.error import URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from exporters.http_common import parse_retry_after_delay
 from exporters.otlp_http import OtlpHttpMetricSender
 
 
 class _FakeResponse:
-    def __init__(self, *, status: int) -> None:
+    def __init__(self, *, status: int, headers: dict[str, str] | None = None) -> None:
         self.status = status
+        self.headers = headers or {}
 
     def __enter__(self) -> "_FakeResponse":
         return self
@@ -27,6 +29,13 @@ class _FakeResponse:
 
 class OtlpHttpMetricSenderTests(unittest.TestCase):
     """Validate OTLP HTTP request dispatch behavior."""
+
+    @staticmethod
+    def _async_sleep_recorder(target: list[float]):
+        async def _sleep(seconds: float) -> None:
+            target.append(seconds)
+
+        return _sleep
 
     def test_posts_json_payload(self) -> None:
         captured: dict[str, object] = {}
@@ -39,6 +48,7 @@ class OtlpHttpMetricSenderTests(unittest.TestCase):
         sender = OtlpHttpMetricSender(
             endpoint="https://collector.example.com/v1/metrics",
             timeout_seconds=9,
+            headers={"x-agent-id": "agt_01JXYZ123"},
             http_client=fake_http_client,
         )
         payload = {"resourceMetrics": []}
@@ -57,6 +67,7 @@ class OtlpHttpMetricSenderTests(unittest.TestCase):
         headers = {key.lower(): value for key, value in request.header_items()}
         self.assertEqual(headers["content-type"], "application/json")
         self.assertEqual(headers["accept"], "application/json")
+        self.assertEqual(headers["x-agent-id"], "agt_01JXYZ123")
 
     def test_applies_custom_headers(self) -> None:
         captured: dict[str, object] = {}
@@ -68,7 +79,7 @@ class OtlpHttpMetricSenderTests(unittest.TestCase):
 
         sender = OtlpHttpMetricSender(
             endpoint="https://collector.example.com/v1/metrics",
-            headers={"api-key": "secret-token"},
+            headers={"api-key": "secret-token", "x-agent-id": "agt_01JXYZ123"},
             http_client=fake_http_client,
         )
         sender.send({"resourceMetrics": []})
@@ -77,12 +88,13 @@ class OtlpHttpMetricSenderTests(unittest.TestCase):
         assert hasattr(request, "header_items")
         headers = {key.lower(): value for key, value in request.header_items()}
         self.assertEqual(headers["api-key"], "secret-token")
+        self.assertEqual(headers["x-agent-id"], "agt_01JXYZ123")
 
     def test_logs_info_when_headers_are_accepted(self) -> None:
         logger = Mock()
         sender = OtlpHttpMetricSender(
             endpoint="https://collector.example.com/v1/metrics",
-            headers={"api-key": "secret-token"},
+            headers={"api-key": "secret-token", "x-agent-id": "agt_01JXYZ123"},
             http_client=lambda request, timeout: _FakeResponse(status=200),
             logger=logger,
         )
@@ -94,6 +106,7 @@ class OtlpHttpMetricSenderTests(unittest.TestCase):
         logger = Mock()
         sender = OtlpHttpMetricSender(
             endpoint="https://collector.example.com/v1/metrics",
+            headers={"x-agent-id": "agt_01JXYZ123"},
             http_client=lambda request, timeout: _FakeResponse(status=500),
             logger=logger,
         )
@@ -109,6 +122,7 @@ class OtlpHttpMetricSenderTests(unittest.TestCase):
 
         sender = OtlpHttpMetricSender(
             endpoint="https://collector.example.com/v1/metrics",
+            headers={"x-agent-id": "agt_01JXYZ123"},
             http_client=failing_http_client,
             logger=logger,
         )
@@ -120,7 +134,7 @@ class OtlpHttpMetricSenderTests(unittest.TestCase):
         logger = Mock()
         sender = OtlpHttpMetricSender(
             endpoint="https://collector.example.com/v1/metrics",
-            headers={"api-key": "bad"},
+            headers={"api-key": "bad", "x-agent-id": "agt_01JXYZ123"},
             http_client=lambda request, timeout: _FakeResponse(status=401),
             logger=logger,
         )
@@ -143,8 +157,9 @@ class OtlpHttpMetricSenderTests(unittest.TestCase):
             retry_max_attempts=3,
             retry_initial_backoff_seconds=0.25,
             retry_max_backoff_seconds=1.0,
+            headers={"x-agent-id": "agt_01JXYZ123"},
             http_client=flaky_http_client,
-            sleep_fn=sleeps.append,
+            sleep_fn=self._async_sleep_recorder(sleeps),
             logger=logger,
         )
         sender.send({"resourceMetrics": []})
@@ -160,8 +175,9 @@ class OtlpHttpMetricSenderTests(unittest.TestCase):
             retry_max_attempts=3,
             retry_initial_backoff_seconds=0.25,
             retry_max_backoff_seconds=1.0,
+            headers={"x-agent-id": "agt_01JXYZ123"},
             http_client=lambda request, timeout: _FakeResponse(status=400),
-            sleep_fn=sleeps.append,
+            sleep_fn=self._async_sleep_recorder(sleeps),
         )
         with self.assertRaisesRegex(RuntimeError, "non-success status code 400"):
             sender.send({"resourceMetrics": []})
@@ -181,8 +197,9 @@ class OtlpHttpMetricSenderTests(unittest.TestCase):
             retry_max_attempts=3,
             retry_initial_backoff_seconds=0.25,
             retry_max_backoff_seconds=1.0,
+            headers={"x-agent-id": "agt_01JXYZ123"},
             http_client=failing_http_client,
-            sleep_fn=sleeps.append,
+            sleep_fn=self._async_sleep_recorder(sleeps),
             logger=logger,
         )
         with self.assertRaisesRegex(RuntimeError, "failed to reach endpoint"):
@@ -203,6 +220,85 @@ class OtlpHttpMetricSenderTests(unittest.TestCase):
                 endpoint="https://collector.example.com/v1/metrics",
                 timeout_seconds=0,
             )
+
+    def test_raises_when_x_agent_id_is_missing(self) -> None:
+        sender = OtlpHttpMetricSender(
+            endpoint="https://collector.example.com/v1/metrics",
+            http_client=lambda request, timeout: _FakeResponse(status=200),
+        )
+        with self.assertRaisesRegex(RuntimeError, "missing x-agent-id"):
+            sender.send({"resourceMetrics": []})
+
+    def test_retries_429_using_retry_after_header_without_extra_backoff(self) -> None:
+        sleeps: list[float] = []
+        requests: list[tuple[bytes, dict[str, str]]] = []
+        responses = [
+            _FakeResponse(status=429, headers={"Retry-After": "20"}),
+            _FakeResponse(status=200),
+        ]
+
+        def fake_http_client(request, timeout):
+            del timeout
+            requests.append(
+                (
+                    request.data,
+                    {key.lower(): value for key, value in request.header_items()},
+                )
+            )
+            return responses[len(requests) - 1]
+
+        sender = OtlpHttpMetricSender(
+            endpoint="https://collector.example.com/v1/metrics",
+            retry_max_attempts=3,
+            headers={"x-agent-id": "agt_01JXYZ123"},
+            http_client=fake_http_client,
+            sleep_fn=self._async_sleep_recorder(sleeps),
+        )
+        sender.send({"resourceMetrics": [{"scopeMetrics": []}]})
+
+        self.assertEqual(sleeps, [20])
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0][0], requests[1][0])
+        self.assertEqual(requests[0][1]["x-agent-id"], requests[1][1]["x-agent-id"])
+
+    def test_retry_after_parser_is_case_insensitive_and_caps_values(self) -> None:
+        parsed = parse_retry_after_delay(
+            headers={"retry-after": "999"},
+            default_seconds=5,
+            max_seconds=300,
+        )
+        self.assertEqual(parsed.seconds, 300)
+        self.assertEqual(parsed.source, "header")
+        self.assertFalse(parsed.default_used)
+        self.assertTrue(parsed.capped)
+
+    def test_retry_after_parser_handles_missing_invalid_negative_and_zero(self) -> None:
+        missing = parse_retry_after_delay(
+            headers={},
+            default_seconds=5,
+            max_seconds=300,
+        )
+        invalid = parse_retry_after_delay(
+            headers={"Retry-After": "bad"},
+            default_seconds=5,
+            max_seconds=300,
+        )
+        negative = parse_retry_after_delay(
+            headers={"Retry-After": "-1"},
+            default_seconds=5,
+            max_seconds=300,
+        )
+        zero = parse_retry_after_delay(
+            headers={"Retry-After": "0"},
+            default_seconds=5,
+            max_seconds=300,
+        )
+
+        self.assertTrue(missing.default_used)
+        self.assertEqual(invalid.seconds, 5)
+        self.assertEqual(negative.seconds, 5)
+        self.assertFalse(zero.default_used)
+        self.assertEqual(zero.seconds, 0)
 
     def test_rejects_invalid_endpoint(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "Invalid OTLP HTTP endpoint"):
