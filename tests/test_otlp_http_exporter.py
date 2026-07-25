@@ -40,6 +40,7 @@ class OtlpHttpExporterTests(unittest.TestCase):
         exporter = OtlpHttpExporter(
             endpoint="https://collector.example.com/v1/metrics",
             sender=sender,
+            background_dispatch=False,
         )
         metric = {
             "name": "heka_cpu_usage_percent",
@@ -69,7 +70,7 @@ class OtlpHttpExporterTests(unittest.TestCase):
             },
             clear=True,
         ):
-            exporter = OtlpHttpExporter(sender=sender)
+            exporter = OtlpHttpExporter(sender=sender, background_dispatch=False)
             exporter.initialize()
 
             self.assertEqual(
@@ -132,7 +133,7 @@ class OtlpHttpExporterTests(unittest.TestCase):
         self.assertEqual(sender._headers["x-agent-id"], "agt_01JXYZ123")
         self.assertEqual(sender._headers["x-api-key"], "hek_live_secret_123")
 
-    def test_initialize_fails_when_heka_intelligence_enabled_without_credentials(self) -> None:
+    def test_export_drops_batch_when_x_agent_id_is_missing(self) -> None:
         with patch.dict(
             os.environ,
             {
@@ -143,8 +144,9 @@ class OtlpHttpExporterTests(unittest.TestCase):
             clear=True,
         ):
             exporter = create_exporter("otlp_http")
-            with self.assertRaisesRegex(RuntimeError, "HEKA_AGENT_ID"):
-                exporter.initialize()
+            exporter.initialize()
+            with self.assertRaisesRegex(RuntimeError, "missing x-agent-id"):
+                exporter._sender.send({"resourceMetrics": []})  # type: ignore[union-attr]
 
     def test_initialize_fails_on_invalid_otlp_http_headers(self) -> None:
         with patch.dict(

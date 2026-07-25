@@ -421,6 +421,23 @@ Initial retry delay for transient OTLP failures.
 
 Maximum retry delay cap for OTLP exponential backoff.
 
+#### `OTLP_RETRY_AFTER_DEFAULT_SECONDS`
+
+Default wait in seconds for HTTP `429` responses when `Retry-After` is missing, empty, invalid, or negative.
+Applies to all HTTP exporter implementations in this repo.
+
+#### `OTLP_RETRY_AFTER_MAX_SECONDS`
+
+Maximum allowed wait in seconds for HTTP `429` `Retry-After` values.
+Header values above this cap are reduced to this maximum.
+Applies to all HTTP exporter implementations in this repo.
+
+#### `HEKA_AGENT_ID`
+
+Required for outbound HTTP batch dispatch.
+The agent sends this value as `x-agent-id` and reuses it across `429` retries for the same batch.
+If `HEKA_AGENT_ID` is unavailable, the batch export is skipped and the agent keeps running.
+
 #### `NEWRELIC_OTLP_ENDPOINT`
 
 Required when `EXPORTER_TYPE=newrelic_otlp`. Must be an absolute `http://` or `https://` URL.
@@ -476,6 +493,18 @@ Tag conflicts are resolved deterministically: configured `DATADOG_TAGS` values o
 #### `DATADOG_METRIC_PREFIX`
 
 Optional prefix for Datadog native metrics. If a metric name is already prefixed, it is not prefixed again.
+
+### HTTP 429 Behavior
+
+All HTTP exporters in this repo now handle `429 Too Many Requests` through a dedicated `Retry-After` path:
+
+- `Retry-After` is read case-insensitively.
+- integer second values are honored directly.
+- missing, empty, invalid, and negative values use `OTLP_RETRY_AFTER_DEFAULT_SECONDS`.
+- values above `OTLP_RETRY_AFTER_MAX_SECONDS` are capped.
+- the same payload and the same `x-agent-id` are retried after the wait.
+- no extra exponential backoff is added on top of a valid `Retry-After` delay.
+- batch failures do not terminate the main agent loop.
 
 ### Datadog OTLP Preset Example
 
