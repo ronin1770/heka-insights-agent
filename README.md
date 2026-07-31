@@ -6,6 +6,19 @@
 
 The project is being built to stay simple, portable, contributor-friendly, and flexible enough for future standalone executable packaging.
 
+![Python](https://img.shields.io/badge/Python-3.11+-blue)
+![Linux](https://img.shields.io/badge/Linux-Ubuntu%20%7C%20Debian%20%7C%20RHEL-green)
+![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-OTLP-orange)
+![Prometheus](https://img.shields.io/badge/Prometheus-Compatible-E6522C)
+![OpenMetrics](https://img.shields.io/badge/OpenMetrics-Supported-blueviolet)
+![JSON](https://img.shields.io/badge/Output-JSON-lightgrey)
+![MIT License](https://img.shields.io/github/license/ronin1770/heka-insights-agent)
+![GitHub Stars](https://img.shields.io/github/stars/ronin1770/heka-insights-agent)
+![GitHub Forks](https://img.shields.io/github/forks/ronin1770/heka-insights-agent)
+![GitHub Issues](https://img.shields.io/github/issues/ronin1770/heka-insights-agent)
+![GitHub Release](https://img.shields.io/github/v/release/ronin1770/heka-insights-agent)
+![GitHub Downloads](https://img.shields.io/github/downloads/ronin1770/heka-insights-agent/total)
+
 ---
 
 ## Why This Project Exists
