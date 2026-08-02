@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 import time
+import uuid
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -90,18 +91,20 @@ class OtlpHttpMetricSender:
     def send(self, payload: Mapping[str, Any]) -> None:
         """Dispatch payload as an OTLP HTTP POST request."""
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        asyncio.run(self._send_async(body))
+        idempotency_key = self._create_idempotency_key()
+        asyncio.run(self._send_async(body, idempotency_key=idempotency_key))
 
-    async def _send_async(self, body: bytes) -> None:
+    async def _send_async(self, body: bytes, *, idempotency_key: str) -> None:
         batch_started = time.monotonic()
         masked_agent_id = self._masked_agent_id()
+        masked_idempotency_key = mask_identifier(idempotency_key)
         self._ensure_agent_id_configured(masked_agent_id=masked_agent_id)
 
         for attempt in range(1, self._retry_max_attempts + 1):
             if self._shutdown_event.is_set():
                 raise ShutdownRequestedError("Shutdown requested before OTLP export.")
 
-            request = self._build_request(body)
+            request = self._build_request(body, idempotency_key=idempotency_key)
             request_started = time.monotonic()
             try:
                 with self._http_client(request, timeout=self._timeout_seconds) as response:
@@ -120,6 +123,7 @@ class OtlpHttpMetricSender:
                             )
                             * 1000.0,
                             masked_agent_id=masked_agent_id,
+                            masked_idempotency_key=masked_idempotency_key,
                         )
                         return
 
@@ -130,6 +134,7 @@ class OtlpHttpMetricSender:
                         request_ms=request_ms,
                         batch_started=batch_started,
                         masked_agent_id=masked_agent_id,
+                        masked_idempotency_key=masked_idempotency_key,
                     ):
                         continue
 
@@ -145,6 +150,7 @@ class OtlpHttpMetricSender:
                     request_ms=request_ms,
                     batch_started=batch_started,
                     masked_agent_id=masked_agent_id,
+                    masked_idempotency_key=masked_idempotency_key,
                 ):
                     continue
                 raise RuntimeError(
@@ -159,6 +165,7 @@ class OtlpHttpMetricSender:
                         request_ms=request_ms,
                         reason=f"transport_error={exc.reason}",
                         masked_agent_id=masked_agent_id,
+                        masked_idempotency_key=masked_idempotency_key,
                     )
                     await self._sleep_before_retry(attempt=attempt)
                     continue
@@ -166,13 +173,14 @@ class OtlpHttpMetricSender:
                 self._logger_debug(
                     "OTLP export failed; endpoint=%s status=transport attempt=%s "
                     "max_attempts=%s retry_request_ms=%.3f total_batch_export_ms=%.3f "
-                    "x_agent_id=%s error=%s",
+                    "x_agent_id=%s x_idempotency_key=%s error=%s",
                     self._endpoint,
                     attempt,
                     self._retry_max_attempts,
                     request_ms,
                     (time.monotonic() - batch_started) * 1000.0,
                     masked_agent_id,
+                    masked_idempotency_key,
                     exc.reason,
                 )
                 raise RuntimeError(
@@ -180,10 +188,11 @@ class OtlpHttpMetricSender:
                     f"{exc.reason}."
                 ) from exc
 
-    def _build_request(self, body: bytes) -> Request:
+    def _build_request(self, body: bytes, *, idempotency_key: str) -> Request:
         request = Request(url=self._endpoint, data=body, method="POST")
         request.add_header("Content-Type", "application/json")
         request.add_header("Accept", "application/json")
+        request.add_header("X-Idempotency-Key", idempotency_key)
         for key, value in self._headers.items():
             request.add_header(key, value)
         return request
@@ -197,6 +206,7 @@ class OtlpHttpMetricSender:
         request_ms: float,
         batch_started: float,
         masked_agent_id: str,
+        masked_idempotency_key: str,
     ) -> bool:
         if status_code == 429 and self._should_retry(status_code=status_code, attempt=attempt):
             await self._sleep_for_retry_after(
@@ -205,6 +215,7 @@ class OtlpHttpMetricSender:
                 request_ms=request_ms,
                 batch_started=batch_started,
                 masked_agent_id=masked_agent_id,
+                masked_idempotency_key=masked_idempotency_key,
             )
             return True
 
@@ -215,6 +226,7 @@ class OtlpHttpMetricSender:
                 request_ms=request_ms,
                 reason=f"http_status={status_code}",
                 masked_agent_id=masked_agent_id,
+                masked_idempotency_key=masked_idempotency_key,
             )
             await self._sleep_before_retry(attempt=attempt)
             return True
@@ -225,6 +237,7 @@ class OtlpHttpMetricSender:
             request_ms=request_ms,
             total_batch_export_ms=(time.monotonic() - batch_started) * 1000.0,
             masked_agent_id=masked_agent_id,
+            masked_idempotency_key=masked_idempotency_key,
         )
         return False
 
@@ -236,6 +249,7 @@ class OtlpHttpMetricSender:
         request_ms: float,
         batch_started: float,
         masked_agent_id: str,
+        masked_idempotency_key: str,
     ) -> bool:
         if exc.code == 429 and self._should_retry(status_code=exc.code, attempt=attempt):
             await self._sleep_for_retry_after(
@@ -244,6 +258,7 @@ class OtlpHttpMetricSender:
                 request_ms=request_ms,
                 batch_started=batch_started,
                 masked_agent_id=masked_agent_id,
+                masked_idempotency_key=masked_idempotency_key,
             )
             return True
 
@@ -254,6 +269,7 @@ class OtlpHttpMetricSender:
                 request_ms=request_ms,
                 reason=f"http_status={exc.code}",
                 masked_agent_id=masked_agent_id,
+                masked_idempotency_key=masked_idempotency_key,
             )
             await self._sleep_before_retry(attempt=attempt)
             return True
@@ -264,6 +280,7 @@ class OtlpHttpMetricSender:
             request_ms=request_ms,
             total_batch_export_ms=(time.monotonic() - batch_started) * 1000.0,
             masked_agent_id=masked_agent_id,
+            masked_idempotency_key=masked_idempotency_key,
         )
         return False
 
@@ -300,6 +317,7 @@ class OtlpHttpMetricSender:
         request_ms: float,
         batch_started: float,
         masked_agent_id: str,
+        masked_idempotency_key: str,
     ) -> None:
         retry_after = parse_retry_after_delay(
             headers=headers,
@@ -310,7 +328,8 @@ class OtlpHttpMetricSender:
             "OTLP export rate limited; endpoint=%s status=429 attempt=%s max_attempts=%s "
             "retry_after_seconds=%s retry_after_source=%s retry_after_default_used=%s "
             "retry_after_capped=%s retry_after_parse_ms=%.3f retry_after_sleep_seconds=%s "
-            "retry_request_ms=%.3f total_batch_export_ms=%.3f x_agent_id=%s",
+            "retry_request_ms=%.3f total_batch_export_ms=%.3f x_agent_id=%s "
+            "x_idempotency_key=%s",
             self._endpoint,
             attempt,
             self._retry_max_attempts,
@@ -323,6 +342,7 @@ class OtlpHttpMetricSender:
             request_ms,
             (time.monotonic() - batch_started) * 1000.0,
             masked_agent_id,
+            masked_idempotency_key,
         )
         await sleep_with_shutdown(
             seconds=retry_after.seconds,
@@ -338,11 +358,13 @@ class OtlpHttpMetricSender:
         request_ms: float,
         reason: str,
         masked_agent_id: str,
+        masked_idempotency_key: str,
     ) -> None:
         next_attempt = attempt + 1
         self._logger_debug(
             "OTLP export retry scheduled; endpoint=%s status=%s attempt=%s max_attempts=%s "
-            "retry_request_ms=%.3f next_attempt=%s reason=%s x_agent_id=%s",
+            "retry_request_ms=%.3f next_attempt=%s reason=%s x_agent_id=%s "
+            "x_idempotency_key=%s",
             self._endpoint,
             status_code,
             attempt,
@@ -351,6 +373,7 @@ class OtlpHttpMetricSender:
             next_attempt,
             reason,
             masked_agent_id,
+            masked_idempotency_key,
         )
 
     def _validate_endpoint(self) -> None:
@@ -391,12 +414,13 @@ class OtlpHttpMetricSender:
         request_ms: float,
         total_batch_export_ms: float,
         masked_agent_id: str,
+        masked_idempotency_key: str,
     ) -> None:
         if status_code in (401, 403):
             self._logger_debug(
                 "OTLP export failed; endpoint=%s status=%s attempt=%s max_attempts=%s "
                 "retry_request_ms=%.3f total_batch_export_ms=%.3f x_agent_id=%s "
-                "error=auth_headers_rejected",
+                "x_idempotency_key=%s error=auth_headers_rejected",
                 self._endpoint,
                 status_code,
                 attempt,
@@ -404,11 +428,13 @@ class OtlpHttpMetricSender:
                 request_ms,
                 total_batch_export_ms,
                 masked_agent_id,
+                masked_idempotency_key,
             )
             return
         self._logger_debug(
             "OTLP export failed; endpoint=%s status=%s attempt=%s max_attempts=%s "
-            "retry_request_ms=%.3f total_batch_export_ms=%.3f x_agent_id=%s",
+            "retry_request_ms=%.3f total_batch_export_ms=%.3f x_agent_id=%s "
+            "x_idempotency_key=%s",
             self._endpoint,
             status_code,
             attempt,
@@ -416,6 +442,7 @@ class OtlpHttpMetricSender:
             request_ms,
             total_batch_export_ms,
             masked_agent_id,
+            masked_idempotency_key,
         )
 
     def _log_success(
@@ -426,18 +453,34 @@ class OtlpHttpMetricSender:
         request_ms: float,
         total_batch_export_ms: float,
         masked_agent_id: str,
+        masked_idempotency_key: str,
     ) -> None:
         if self._headers:
             self._logger_info(
                 "OTLP export completed; endpoint=%s status=%s attempt=%s retry_request_ms=%.3f "
-                "total_batch_export_ms=%.3f x_agent_id=%s",
+                "total_batch_export_ms=%.3f x_agent_id=%s x_idempotency_key=%s",
                 self._endpoint,
                 status_code,
                 attempt,
                 request_ms,
                 total_batch_export_ms,
                 masked_agent_id,
+                masked_idempotency_key,
             )
+
+    def _create_idempotency_key(self) -> str:
+        try:
+            return str(uuid.uuid4())
+        except Exception as exc:  # pragma: no cover - defensive guardrail
+            self._logger_error(
+                "OTLP export skipped; endpoint=%s status=not_sent attempt=0 max_attempts=%s "
+                "error=idempotency_key_generation_failed",
+                self._endpoint,
+                self._retry_max_attempts,
+            )
+            raise RuntimeError(
+                "OTLP HTTP export failed to generate x-idempotency-key; batch not dispatched."
+            ) from exc
 
     def _ensure_agent_id_configured(self, *, masked_agent_id: str) -> None:
         agent_id = self._headers.get("x-agent-id")
