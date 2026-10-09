@@ -14,10 +14,16 @@ import sys
 import time
 from collections.abc import Sequence
 
-from config import ExporterType, get_cpu_poll_interval_seconds, get_exporter_type
+from config import (
+    ExporterType,
+    get_cpu_poll_interval_seconds,
+    get_exporter_type,
+    get_process_poll_interval_seconds,
+)
 from collectors.cpu import CPUCollector, MonotonicTicker
 from collectors.disk import DiskCollector
 from collectors.memory import MemoryCollector
+from collectors.process import ProcessCollector
 from exporters import Exporter, create_exporter
 from logger.config import get_logger
 from pipeline import build_canonical_metrics
@@ -30,16 +36,22 @@ def run_collectors_loop(
     exporter_type: ExporterType,
     logger: logging.Logger,
 ) -> None:
-    """Run CPU, memory, and disk collectors with a fixed, drift-safe cadence."""
+    """Run host and process collectors on their configured cadences."""
     interval_seconds = get_cpu_poll_interval_seconds(logger=logger)
+    process_interval_seconds = get_process_poll_interval_seconds(logger=logger)
     cpu_collector = CPUCollector(per_cpu=False, detail="detailed")
     memory_collector = MemoryCollector(detail="detailed")
     disk_collector = DiskCollector(detail="detailed")
+    process_collector = ProcessCollector()
+    process_collector.prime()
+    next_process_collection = time.monotonic() + process_interval_seconds
     ticker = MonotonicTicker(interval_seconds=interval_seconds)
 
     logger.info(
-        "CPU, memory, and disk collectors initialized | interval_seconds=%.1f | exporter_type=%s",
+        "CPU, memory, disk, and process collectors initialized | "
+        "interval_seconds=%.1f | process_interval_seconds=%.1f | exporter_type=%s",
         interval_seconds,
+        process_interval_seconds,
         exporter_type,
     )
 
@@ -56,12 +68,21 @@ def run_collectors_loop(
         disk_payload = disk_collector.collect()
         logger.info("Disk metrics: %s", disk_payload)
 
+        payloads = {
+            "cpu": cpu_payload,
+            "memory": memory_payload,
+            "disk": disk_payload,
+        }
+        current_monotonic = time.monotonic()
+        if current_monotonic >= next_process_collection:
+            process_payload = process_collector.collect()
+            payloads["process"] = process_payload
+            logger.info("Process and network metrics: %s", process_payload)
+            while next_process_collection <= current_monotonic:
+                next_process_collection += process_interval_seconds
+
         canonical_metrics = build_canonical_metrics(
-            {
-                "cpu": cpu_payload,
-                "memory": memory_payload,
-                "disk": disk_payload,
-            },
+            payloads,
             timestamp_unix_ms=int(time.time() * 1000),
         )
         try:
