@@ -73,6 +73,46 @@ _METRIC_META: dict[str, _MetricMeta] = {
         metric_type="counter",
         unit="count",
     ),
+    "heka_process_cpu_usage_percent": _MetricMeta(
+        description="Process CPU usage percentage.",
+        metric_type="gauge",
+        unit="percent",
+    ),
+    "heka_process_rss_bytes": _MetricMeta(
+        description="Process resident set size in bytes.",
+        metric_type="gauge",
+        unit="bytes",
+    ),
+    "heka_process_threads": _MetricMeta(
+        description="Process thread count.",
+        metric_type="gauge",
+        unit="count",
+    ),
+    "heka_process_open_file_descriptors": _MetricMeta(
+        description="Process open file descriptor count.",
+        metric_type="gauge",
+        unit="count",
+    ),
+    "heka_process_disk_read_bytes_total": _MetricMeta(
+        description="Total bytes read by a process.",
+        metric_type="counter",
+        unit="bytes",
+    ),
+    "heka_process_disk_write_bytes_total": _MetricMeta(
+        description="Total bytes written by a process.",
+        metric_type="counter",
+        unit="bytes",
+    ),
+    "heka_network_sent_bytes_total": _MetricMeta(
+        description="Total bytes sent by the host.",
+        metric_type="counter",
+        unit="bytes",
+    ),
+    "heka_network_received_bytes_total": _MetricMeta(
+        description="Total bytes received by the host.",
+        metric_type="counter",
+        unit="bytes",
+    ),
 }
 
 
@@ -85,6 +125,7 @@ def build_canonical_metrics(
     cpu_payload = payloads.get("cpu")
     memory_payload = payloads.get("memory")
     disk_payload = payloads.get("disk")
+    process_payload = payloads.get("process")
 
     if not isinstance(cpu_payload, Mapping):
         raise ValueError("payloads['cpu'] must be a mapping")
@@ -97,6 +138,12 @@ def build_canonical_metrics(
     _collect_cpu_metrics(metrics, cpu_payload, timestamp_unix_ms=timestamp_unix_ms)
     _collect_memory_metrics(metrics, memory_payload, timestamp_unix_ms=timestamp_unix_ms)
     _collect_disk_metrics(metrics, disk_payload, timestamp_unix_ms=timestamp_unix_ms)
+    if isinstance(process_payload, Mapping):
+        _collect_process_metrics(
+            metrics,
+            process_payload,
+            timestamp_unix_ms=timestamp_unix_ms,
+        )
     return metrics
 
 
@@ -239,6 +286,63 @@ def _append_disk_counters(
         name="heka_disk_writes_total",
         value=counters.get("write_count"),
         labels=labels,
+        timestamp_unix_ms=timestamp_unix_ms,
+    )
+
+
+def _collect_process_metrics(
+    metrics: list[CanonicalMetric],
+    process_payload: Mapping[str, Any],
+    *,
+    timestamp_unix_ms: int | None,
+) -> None:
+    processes = process_payload.get("processes")
+    if isinstance(processes, list):
+        field_metrics = (
+            ("cpu_percent", "heka_process_cpu_usage_percent"),
+            ("rss_bytes", "heka_process_rss_bytes"),
+            ("threads", "heka_process_threads"),
+            ("open_file_descriptors", "heka_process_open_file_descriptors"),
+            ("disk_read_bytes", "heka_process_disk_read_bytes_total"),
+            ("disk_write_bytes", "heka_process_disk_write_bytes_total"),
+        )
+        for process in processes:
+            if not isinstance(process, Mapping):
+                continue
+            pid = process.get("pid")
+            if not isinstance(pid, int) or isinstance(pid, bool):
+                continue
+            process_name = process.get("name")
+            labels = {
+                "pid": str(pid),
+                "process_name": (
+                    process_name if isinstance(process_name, str) else ""
+                ),
+            }
+            for field_name, metric_name in field_metrics:
+                _append_if_numeric(
+                    metrics,
+                    name=metric_name,
+                    value=process.get(field_name),
+                    labels=labels,
+                    timestamp_unix_ms=timestamp_unix_ms,
+                )
+
+    network = process_payload.get("network")
+    if not isinstance(network, Mapping):
+        return
+    _append_if_numeric(
+        metrics,
+        name="heka_network_sent_bytes_total",
+        value=network.get("bytes_sent"),
+        labels={},
+        timestamp_unix_ms=timestamp_unix_ms,
+    )
+    _append_if_numeric(
+        metrics,
+        name="heka_network_received_bytes_total",
+        value=network.get("bytes_received"),
+        labels={},
         timestamp_unix_ms=timestamp_unix_ms,
     )
 
