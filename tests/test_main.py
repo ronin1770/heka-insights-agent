@@ -34,6 +34,16 @@ class _FakeProcessCollector(_FakeCollector):
         return super().collect()
 
 
+class _FakeProcCollector:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._payload = payload
+        self.calls: list[list[dict[str, object]]] = []
+
+    def collect(self, processes) -> dict[str, object]:
+        self.calls.append(list(processes))
+        return dict(self._payload)
+
+
 class _FakeTicker:
     def __init__(self, *, interval_seconds: float) -> None:
         del interval_seconds
@@ -66,14 +76,17 @@ class MainLoopTests(unittest.TestCase):
         process_collector = _FakeProcessCollector(
             {"processes": [], "network": {}}
         )
+        proc_collector = _FakeProcCollector({})
 
         with (
             patch.object(main, "get_cpu_poll_interval_seconds", return_value=5.0),
             patch.object(main, "get_process_poll_interval_seconds", return_value=30.0),
+            patch.object(main, "get_proc_poll_interval_seconds", return_value=30.0),
             patch.object(main, "CPUCollector", return_value=_FakeCollector(cpu_payload)),
             patch.object(main, "MemoryCollector", return_value=_FakeCollector(memory_payload)),
             patch.object(main, "DiskCollector", return_value=_FakeCollector(disk_payload)),
             patch.object(main, "ProcessCollector", return_value=process_collector),
+            patch.object(main, "ProcCollector", return_value=proc_collector),
             patch.object(main, "MonotonicTicker", _FakeTicker),
             patch.object(main, "build_canonical_metrics", return_value=[{"name": "metric"}]),
         ):
@@ -96,11 +109,14 @@ class MainLoopTests(unittest.TestCase):
             "network": {"bytes_sent": 1, "bytes_received": 2},
         }
         process_collector = _FakeProcessCollector(process_payload)
+        proc_payload = {"tcp": {"listen": 1}}
+        proc_collector = _FakeProcCollector(proc_payload)
         build_metrics = Mock(return_value=[])
 
         with (
             patch.object(main, "get_cpu_poll_interval_seconds", return_value=5.0),
             patch.object(main, "get_process_poll_interval_seconds", return_value=30.0),
+            patch.object(main, "get_proc_poll_interval_seconds", return_value=30.0),
             patch.object(
                 main,
                 "CPUCollector",
@@ -109,6 +125,7 @@ class MainLoopTests(unittest.TestCase):
             patch.object(main, "MemoryCollector", return_value=_FakeCollector({})),
             patch.object(main, "DiskCollector", return_value=_FakeCollector({})),
             patch.object(main, "ProcessCollector", return_value=process_collector),
+            patch.object(main, "ProcCollector", return_value=proc_collector),
             patch.object(main, "MonotonicTicker", _FakeTicker),
             patch.object(main, "build_canonical_metrics", build_metrics),
             patch.object(main.time, "monotonic", side_effect=(0.0, 10.0, 31.0)),
@@ -122,11 +139,51 @@ class MainLoopTests(unittest.TestCase):
 
         self.assertEqual(process_collector.prime_calls, 1)
         self.assertEqual(process_collector.collect_calls, 1)
+        self.assertEqual(proc_collector.calls, [process_payload["processes"]])
         first_payloads = build_metrics.call_args_list[0].args[0]
         second_payloads = build_metrics.call_args_list[1].args[0]
         self.assertNotIn("process", first_payloads)
         self.assertEqual(second_payloads["process"], process_payload)
+        self.assertEqual(second_payloads["proc"], proc_payload)
         self.assertEqual(exporter.export.call_args_list, [call([]), call([])])
+
+    def test_proc_collection_has_an_independent_schedule(self) -> None:
+        logger = Mock()
+        exporter = Mock()
+        process_collector = _FakeProcessCollector(
+            {"processes": [], "network": {}}
+        )
+        proc_collector = _FakeProcCollector({"kernel": {"running_tasks": 1}})
+        build_metrics = Mock(return_value=[])
+
+        with (
+            patch.object(main, "get_cpu_poll_interval_seconds", return_value=5.0),
+            patch.object(main, "get_process_poll_interval_seconds", return_value=60.0),
+            patch.object(main, "get_proc_poll_interval_seconds", return_value=30.0),
+            patch.object(
+                main,
+                "CPUCollector",
+                return_value=_FakeCollector({"warming_up": True}),
+            ),
+            patch.object(main, "MemoryCollector", return_value=_FakeCollector({})),
+            patch.object(main, "DiskCollector", return_value=_FakeCollector({})),
+            patch.object(main, "ProcessCollector", return_value=process_collector),
+            patch.object(main, "ProcCollector", return_value=proc_collector),
+            patch.object(main, "MonotonicTicker", _FakeTicker),
+            patch.object(main, "build_canonical_metrics", build_metrics),
+            patch.object(main.time, "monotonic", side_effect=(0.0, 10.0, 31.0)),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                main.run_collectors_loop(
+                    exporter=exporter,
+                    exporter_type="otlp_http",
+                    logger=logger,
+                )
+
+        self.assertEqual(process_collector.collect_calls, 0)
+        self.assertEqual(proc_collector.calls, [[]])
+        self.assertNotIn("proc", build_metrics.call_args_list[0].args[0])
+        self.assertIn("proc", build_metrics.call_args_list[1].args[0])
 
 
 if __name__ == "__main__":

@@ -113,6 +113,46 @@ _METRIC_META: dict[str, _MetricMeta] = {
         metric_type="counter",
         unit="bytes",
     ),
+    "heka_tcp_connections": _MetricMeta(
+        description="Current TCP connections by state.",
+        metric_type="gauge",
+        unit="count",
+    ),
+    "heka_kernel_context_switches_total": _MetricMeta(
+        description="Total kernel context switches.",
+        metric_type="counter",
+        unit="count",
+    ),
+    "heka_kernel_running_tasks": _MetricMeta(
+        description="Current number of runnable kernel tasks.",
+        metric_type="gauge",
+        unit="count",
+    ),
+    "heka_kernel_blocked_tasks": _MetricMeta(
+        description="Current number of kernel tasks blocked on I/O.",
+        metric_type="gauge",
+        unit="count",
+    ),
+    "heka_memory_dirty_bytes": _MetricMeta(
+        description="Memory waiting to be written back in bytes.",
+        metric_type="gauge",
+        unit="bytes",
+    ),
+    "heka_memory_writeback_bytes": _MetricMeta(
+        description="Memory actively being written back in bytes.",
+        metric_type="gauge",
+        unit="bytes",
+    ),
+    "heka_process_limit_open_files": _MetricMeta(
+        description="Configured process open-file resource limit.",
+        metric_type="gauge",
+        unit="count",
+    ),
+    "heka_process_limit_max_processes": _MetricMeta(
+        description="Configured process maximum-processes resource limit.",
+        metric_type="gauge",
+        unit="count",
+    ),
 }
 
 
@@ -126,6 +166,7 @@ def build_canonical_metrics(
     memory_payload = payloads.get("memory")
     disk_payload = payloads.get("disk")
     process_payload = payloads.get("process")
+    proc_payload = payloads.get("proc")
 
     if not isinstance(cpu_payload, Mapping):
         raise ValueError("payloads['cpu'] must be a mapping")
@@ -142,6 +183,12 @@ def build_canonical_metrics(
         _collect_process_metrics(
             metrics,
             process_payload,
+            timestamp_unix_ms=timestamp_unix_ms,
+        )
+    if isinstance(proc_payload, Mapping):
+        _collect_proc_metrics(
+            metrics,
+            proc_payload,
             timestamp_unix_ms=timestamp_unix_ms,
         )
     return metrics
@@ -345,6 +392,88 @@ def _collect_process_metrics(
         labels={},
         timestamp_unix_ms=timestamp_unix_ms,
     )
+
+
+def _collect_proc_metrics(
+    metrics: list[CanonicalMetric],
+    proc_payload: Mapping[str, Any],
+    *,
+    timestamp_unix_ms: int | None,
+) -> None:
+    tcp = proc_payload.get("tcp")
+    if isinstance(tcp, Mapping):
+        for state, value in sorted(tcp.items()):
+            _append_if_numeric(
+                metrics,
+                name="heka_tcp_connections",
+                value=value,
+                labels={"state": str(state)},
+                timestamp_unix_ms=timestamp_unix_ms,
+            )
+
+    kernel = proc_payload.get("kernel")
+    if isinstance(kernel, Mapping):
+        kernel_fields = (
+            ("context_switches_total", "heka_kernel_context_switches_total"),
+            ("running_tasks", "heka_kernel_running_tasks"),
+            ("blocked_tasks", "heka_kernel_blocked_tasks"),
+        )
+        for field_name, metric_name in kernel_fields:
+            _append_if_numeric(
+                metrics,
+                name=metric_name,
+                value=kernel.get(field_name),
+                labels={},
+                timestamp_unix_ms=timestamp_unix_ms,
+            )
+
+    memory = proc_payload.get("memory")
+    if isinstance(memory, Mapping):
+        memory_fields = (
+            ("dirty_bytes", "heka_memory_dirty_bytes"),
+            ("writeback_bytes", "heka_memory_writeback_bytes"),
+        )
+        for field_name, metric_name in memory_fields:
+            _append_if_numeric(
+                metrics,
+                name=metric_name,
+                value=memory.get(field_name),
+                labels={},
+                timestamp_unix_ms=timestamp_unix_ms,
+            )
+
+    process_limits = proc_payload.get("process_limits")
+    if not isinstance(process_limits, list):
+        return
+    limit_fields = (
+        ("max_open_files", "heka_process_limit_open_files"),
+        ("max_processes", "heka_process_limit_max_processes"),
+    )
+    for process in process_limits:
+        if not isinstance(process, Mapping):
+            continue
+        pid = process.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            continue
+        process_name = process.get("name")
+        for field_name, metric_name in limit_fields:
+            limit_values = process.get(field_name)
+            if not isinstance(limit_values, Mapping):
+                continue
+            for limit_kind in ("soft", "hard"):
+                _append_if_numeric(
+                    metrics,
+                    name=metric_name,
+                    value=limit_values.get(limit_kind),
+                    labels={
+                        "pid": str(pid),
+                        "process_name": (
+                            process_name if isinstance(process_name, str) else ""
+                        ),
+                        "limit": limit_kind,
+                    },
+                    timestamp_unix_ms=timestamp_unix_ms,
+                )
 
 
 def _append_if_numeric(

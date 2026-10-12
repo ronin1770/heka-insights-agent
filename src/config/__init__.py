@@ -1,5 +1,10 @@
 """Configuration package exports."""
 
+from .proc_runtime import (
+    DEFAULT_PROC_POLL_INTERVAL_SECONDS,
+    PROC_POLL_INTERVAL_ENV_KEY,
+    get_proc_poll_interval_seconds,
+)
 from .process_runtime import (
     DEFAULT_PROCESS_POLL_INTERVAL_SECONDS,
     PROCESS_POLL_INTERVAL_ENV_KEY,
@@ -85,6 +90,7 @@ __all__ = [
     "DEFAULT_OTLP_RETRY_AFTER_DEFAULT_SECONDS",
     "DEFAULT_OTLP_RETRY_AFTER_MAX_SECONDS",
     "DEFAULT_PROCESS_POLL_INTERVAL_SECONDS",
+    "DEFAULT_PROC_POLL_INTERVAL_SECONDS",
     "DATADOG_API_KEY_ENV_KEY",
     "DATADOG_ENABLED_ENV_KEY",
     "DATADOG_HOSTNAME_ENV_KEY",
@@ -116,6 +122,7 @@ __all__ = [
     "OTLP_RESOURCE_ATTRIBUTES_ENV_KEY",
     "PACKAGE_NAME",
     "PROCESS_POLL_INTERVAL_ENV_KEY",
+    "PROC_POLL_INTERVAL_ENV_KEY",
     "SERVICE_GROUP",
     "SERVICE_NAME",
     "SERVICE_USER",
@@ -142,4 +149,5 @@ __all__ = [
     "get_otlp_retry_after_max_seconds",
     "get_otlp_resource_attributes",
     "get_process_poll_interval_seconds",
+    "get_proc_poll_interval_seconds",
 ]
