@@ -18,12 +18,14 @@ from config import (
     ExporterType,
     get_cpu_poll_interval_seconds,
     get_exporter_type,
+    get_proc_poll_interval_seconds,
     get_process_poll_interval_seconds,
 )
 from collectors.cpu import CPUCollector, MonotonicTicker
 from collectors.disk import DiskCollector
 from collectors.memory import MemoryCollector
 from collectors.process import ProcessCollector
+from collectors.proc import ProcCollector
 from exporters import Exporter, create_exporter
 from logger.config import get_logger
 from pipeline import build_canonical_metrics
@@ -39,19 +41,26 @@ def run_collectors_loop(
     """Run host and process collectors on their configured cadences."""
     interval_seconds = get_cpu_poll_interval_seconds(logger=logger)
     process_interval_seconds = get_process_poll_interval_seconds(logger=logger)
+    proc_interval_seconds = get_proc_poll_interval_seconds(logger=logger)
     cpu_collector = CPUCollector(per_cpu=False, detail="detailed")
     memory_collector = MemoryCollector(detail="detailed")
     disk_collector = DiskCollector(detail="detailed")
     process_collector = ProcessCollector()
+    proc_collector = ProcCollector()
     process_collector.prime()
-    next_process_collection = time.monotonic() + process_interval_seconds
+    schedule_started = time.monotonic()
+    next_process_collection = schedule_started + process_interval_seconds
+    next_proc_collection = schedule_started + proc_interval_seconds
+    selected_processes: list[dict[str, object]] = []
     ticker = MonotonicTicker(interval_seconds=interval_seconds)
 
     logger.info(
-        "CPU, memory, disk, and process collectors initialized | "
-        "interval_seconds=%.1f | process_interval_seconds=%.1f | exporter_type=%s",
+        "CPU, memory, disk, process, and procfs collectors initialized | "
+        "interval_seconds=%.1f | process_interval_seconds=%.1f | "
+        "proc_interval_seconds=%.1f | exporter_type=%s",
         interval_seconds,
         process_interval_seconds,
+        proc_interval_seconds,
         exporter_type,
     )
 
@@ -78,8 +87,18 @@ def run_collectors_loop(
             process_payload = process_collector.collect()
             payloads["process"] = process_payload
             logger.info("Process and network metrics: %s", process_payload)
+            process_entries = process_payload.get("processes")
+            if isinstance(process_entries, list):
+                selected_processes = process_entries
             while next_process_collection <= current_monotonic:
                 next_process_collection += process_interval_seconds
+
+        if current_monotonic >= next_proc_collection:
+            proc_payload = proc_collector.collect(selected_processes)
+            payloads["proc"] = proc_payload
+            logger.info("Procfs metrics: %s", proc_payload)
+            while next_proc_collection <= current_monotonic:
+                next_proc_collection += proc_interval_seconds
 
         canonical_metrics = build_canonical_metrics(
             payloads,

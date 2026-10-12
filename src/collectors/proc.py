@@ -1,199 +1,202 @@
-"""
-We need to add this to our Agent
-This information is necessary for improving diagnostics for our intelligence layer
+"""Collect targeted Linux telemetry directly from ``/proc``."""
 
-Sample Output:
+from __future__ import annotations
 
-{
-  "timestamp": "2026-10-09T10:30:00Z",
-  "tcp": {
-    "established": 145,
-    "listen": 8,
-    "time_wait": 320,
-    "close_wait": 3,
-    "syn_sent": 2,
-    "syn_recv": 5
-  },
-  "process_limits": {
-    "pid": 1421,
-    "max_open_files": {
-      "soft": 1024,
-      "hard": 1048576
-    },
-    "max_processes": {
-      "soft": 15421,
-      "hard": 15421
-    }
-  },
-  "kernel": {
-    "processes_created_total": 152834,
-    "context_switches_total": 98472301,
-    "running_tasks": 3,
-    "blocked_tasks": 1
-  },
-  "memory": {
-    "mem_available_kb": 1258291,
-    "dirty_kb": 8192,
-    "writeback_kb": 1024
-  }
+from collections.abc import Callable, Iterable, Mapping
+from pathlib import Path
+from typing import Any
+
+_TCP_STATES = {
+    "01": "established",
+    "02": "syn_sent",
+    "03": "syn_recv",
+    "06": "time_wait",
+    "08": "close_wait",
+    "0A": "listen",
+}
+_TCP_STATE_NAMES = tuple(_TCP_STATES.values())
+_KERNEL_FIELDS = {
+    "ctxt": "context_switches_total",
+    "procs_running": "running_tasks",
+    "procs_blocked": "blocked_tasks",
+}
+_MEMORY_FIELDS = {
+    "Dirty": "dirty_bytes",
+    "Writeback": "writeback_bytes",
+}
+_LIMIT_FIELDS = {
+    "Max open files": "max_open_files",
+    "Max processes": "max_processes",
 }
 
-SAMPLE CODE: is below
-TODO: make it compatible with our heka agent application
-ensure it is not re-doing the work of src/collectors/cpu.py or disk.py or memory.py
 
-"""
+class ProcCollector:
+    """Read only the procfs files required for Issue #28 telemetry."""
 
-#!/usr/bin/env python3
-"""Read targeted Linux /proc files without external dependencies."""
-import json
-import os
-import socket
-from collections import Counter
-from datetime import datetime, timezone
-from pathlib import Path
+    def __init__(self, *, proc_root: Path | str = Path("/proc")) -> None:
+        self._proc_root = Path(proc_root)
 
-TCP_STATES = {'01': 'established', '02': 'syn_sent', '03': 'syn_recv', '04': 'fin_wait1',
-              '05': 'fin_wait2', '06': 'time_wait', '07': 'close', '08': 'close_wait',
-              '09': 'last_ack', '0A': 'listen', '0B': 'closing'}
+    def collect(
+        self,
+        processes: Iterable[Mapping[str, Any]] = (),
+    ) -> dict[str, Any]:
+        """Return available host and selected-process procfs telemetry."""
+        return {
+            "tcp": self._collect_tcp(),
+            "kernel": self._read_and_parse(
+                self._proc_root / "stat",
+                parse_kernel_stats,
+            ),
+            "memory": self._read_and_parse(
+                self._proc_root / "meminfo",
+                parse_memory_stats,
+            ),
+            "process_limits": self._collect_process_limits(processes),
+        }
 
+    def _collect_tcp(self) -> dict[str, int]:
+        counts = {state: 0 for state in _TCP_STATE_NAMES}
+        readable_sources = 0
 
-def tcp_states():
-    counts = Counter()
-    for name in ('/proc/net/tcp', '/proc/net/tcp6'):
+        for relative_path in (Path("net/tcp"), Path("net/tcp6")):
+            try:
+                content = (self._proc_root / relative_path).read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            if not _has_tcp_table_header(content):
+                continue
+            readable_sources += 1
+            for state, value in parse_tcp_states(content).items():
+                counts[state] += value
+
+        if readable_sources == 0:
+            return {}
+        if readable_sources == 2:
+            return counts
+        return {state: value for state, value in counts.items() if value > 0}
+
+    def _collect_process_limits(
+        self,
+        processes: Iterable[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        collected: list[dict[str, Any]] = []
+        seen_pids: set[int] = set()
+
+        for process in processes:
+            pid = process.get("pid")
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid < 1:
+                continue
+            if pid in seen_pids:
+                continue
+            seen_pids.add(pid)
+
+            limits = self._read_and_parse(
+                self._proc_root / str(pid) / "limits",
+                parse_process_limits,
+            )
+            if not limits:
+                continue
+            name = process.get("name")
+            collected.append(
+                {
+                    "pid": pid,
+                    "name": name if isinstance(name, str) else "",
+                    **limits,
+                }
+            )
+        return collected
+
+    @staticmethod
+    def _read_and_parse(
+        path: Path,
+        parser: Callable[[str], Mapping[str, Any]],
+    ) -> dict[str, Any]:
         try:
-            with open(name, encoding='utf-8') as f:
-                next(f)
-                for line in f:
-                    fields = line.split()
-                    if len(fields) > 3:
-                        counts[TCP_STATES.get(fields[3], fields[3])] += 1
-        except (OSError, StopIteration):
-            pass
-    return dict(counts)
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return {}
+        return dict(parser(content))
 
 
-def process_limits(pid):
-    result = {}
+def parse_tcp_states(content: str) -> dict[str, int]:
+    """Count the six supported TCP states from one procfs socket table."""
+    counts: dict[str, int] = {}
+    for line in content.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) <= 3:
+            continue
+        state = _TCP_STATES.get(fields[3].upper())
+        if state is not None:
+            counts[state] = counts.get(state, 0) + 1
+    return counts
+
+
+def parse_kernel_stats(content: str) -> dict[str, int]:
+    """Parse selected counters and gauges from ``/proc/stat``."""
+    result: dict[str, int] = {}
+    for line in content.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        output_name = _KERNEL_FIELDS.get(fields[0])
+        if output_name is None:
+            continue
+        value = _parse_nonnegative_integer(fields[1])
+        if value is not None:
+            result[output_name] = value
+    return result
+
+
+def parse_memory_stats(content: str) -> dict[str, int]:
+    """Parse Dirty and Writeback values and convert procfs kB to bytes."""
+    result: dict[str, int] = {}
+    for line in content.splitlines():
+        key, separator, raw_value = line.partition(":")
+        output_name = _MEMORY_FIELDS.get(key)
+        if not separator or output_name is None:
+            continue
+        fields = raw_value.split()
+        if len(fields) < 2 or fields[1] != "kB":
+            continue
+        value_kb = _parse_nonnegative_integer(fields[0])
+        if value_kb is not None:
+            result[output_name] = value_kb * 1024
+    return result
+
+
+def parse_process_limits(content: str) -> dict[str, dict[str, int]]:
+    """Parse finite soft and hard values for the two supported limits."""
+    result: dict[str, dict[str, int]] = {}
+    for line in content.splitlines():
+        for proc_name, output_name in _LIMIT_FIELDS.items():
+            if not line.startswith(proc_name):
+                continue
+            fields = line[len(proc_name) :].split()
+            if len(fields) < 2:
+                break
+            values: dict[str, int] = {}
+            soft = _parse_nonnegative_integer(fields[0])
+            hard = _parse_nonnegative_integer(fields[1])
+            if soft is not None:
+                values["soft"] = soft
+            if hard is not None:
+                values["hard"] = hard
+            if values:
+                result[output_name] = values
+            break
+    return result
+
+
+def _parse_nonnegative_integer(raw_value: str) -> int | None:
     try:
-        for line in Path(f'/proc/{pid}/limits').read_text().splitlines()[1:]:
-            if line.startswith('Max open files'):
-                values = line[len('Max open files'):].split()
-                result['max_open_files'] = {'soft': values[0], 'hard': values[1]}
-            elif line.startswith('Max processes'):
-                values = line[len('Max processes'):].split()
-                result['max_processes'] = {'soft': values[0], 'hard': values[1]}
-    except OSError:
-        pass
-    return {'pid': pid, **result}#!/usr/bin/env python3
-"""Read targeted Linux /proc files without external dependencies."""
-import json
-import os
-import socket
-from collections import Counter
-from datetime import datetime, timezone
-from pathlib import Path
-
-TCP_STATES = {'01': 'established', '02': 'syn_sent', '03': 'syn_recv', '04': 'fin_wait1',
-              '05': 'fin_wait2', '06': 'time_wait', '07': 'close', '08': 'close_wait',
-              '09': 'last_ack', '0A': 'listen', '0B': 'closing'}
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
-def tcp_states():
-    counts = Counter()
-    for name in ('/proc/net/tcp', '/proc/net/tcp6'):
-        try:
-            with open(name, encoding='utf-8') as f:
-                next(f)
-                for line in f:
-                    fields = line.split()
-                    if len(fields) > 3:
-                        counts[TCP_STATES.get(fields[3], fields[3])] += 1
-        except (OSError, StopIteration):
-            pass
-    return dict(counts)
-
-
-def process_limits(pid):
-    result = {}
-    try:
-        for line in Path(f'/proc/{pid}/limits').read_text().splitlines()[1:]:
-            if line.startswith('Max open files'):
-                values = line[len('Max open files'):].split()
-                result['max_open_files'] = {'soft': values[0], 'hard': values[1]}
-            elif line.startswith('Max processes'):
-                values = line[len('Max processes'):].split()
-                result['max_processes'] = {'soft': values[0], 'hard': values[1]}
-    except OSError:
-        pass
-    return {'pid': pid, **result}
-
-
-def kernel_stats():
-    keys = {'processes': 'processes_created_total', 'ctxt': 'context_switches_total',
-            'procs_running': 'running_tasks', 'procs_blocked': 'blocked_tasks'}
-    result = {}
-    for line in Path('/proc/stat').read_text().splitlines():
-        parts = line.split()
-        if parts and parts[0] in keys:
-            result[keys[parts[0]]] = int(parts[1])
-    return result
-
-
-def memory_stats():
-    keys = {'MemAvailable': 'mem_available_kb', 'Dirty': 'dirty_kb', 'Writeback': 'writeback_kb'}
-    result = {}
-    for line in Path('/proc/meminfo').read_text().splitlines():
-        key, _, rest = line.partition(':')
-        if key in keys:
-            result[keys[key]] = int(rest.split()[0])
-    return result
-
-
-def main():
-    print(json.dumps({
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-        'tcp': tcp_states(),
-        'process_limits': process_limits(os.getpid()),
-        'kernel': kernel_stats(),
-        'memory': memory_stats(),
-    }, indent=2))
-
-
-if __name__ == '__main__':
-    main()
-
-
-def kernel_stats():
-    keys = {'processes': 'processes_created_total', 'ctxt': 'context_switches_total',
-            'procs_running': 'running_tasks', 'procs_blocked': 'blocked_tasks'}
-    result = {}
-    for line in Path('/proc/stat').read_text().splitlines():
-        parts = line.split()
-        if parts and parts[0] in keys:
-            result[keys[parts[0]]] = int(parts[1])
-    return result
-
-
-def memory_stats():
-    keys = {'MemAvailable': 'mem_available_kb', 'Dirty': 'dirty_kb', 'Writeback': 'writeback_kb'}
-    result = {}
-    for line in Path('/proc/meminfo').read_text().splitlines():
-        key, _, rest = line.partition(':')
-        if key in keys:
-            result[keys[key]] = int(rest.split()[0])
-    return result
-
-
-def main():
-    print(json.dumps({
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-        'tcp': tcp_states(),
-        'process_limits': process_limits(os.getpid()),
-        'kernel': kernel_stats(),
-        'memory': memory_stats(),
-    }, indent=2))
-
-
-if __name__ == '__main__':
-    main()
+def _has_tcp_table_header(content: str) -> bool:
+    lines = content.splitlines()
+    if not lines:
+        return False
+    return "st" in lines[0].split()
