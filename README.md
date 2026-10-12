@@ -199,6 +199,79 @@ Heka Insights Agent is intended to collect and normalize machine telemetry such 
 * runtime health indicators
 * internal application performance stats
 
+### Canonical Metrics
+
+Unsupported or inaccessible metrics are omitted instead of being reported as zero.
+
+#### TCP Connection Metrics
+
+| Metric | Description | Type | Attributes |
+|---|---|---|---|
+| `heka_tcp_connections` | Number of TCP connections in each connection state. | Gauge | `state` |
+
+Supported `state` values:
+
+| State | Description |
+|---|---|
+| `established` | Active connections between communicating endpoints. |
+| `listen` | Sockets waiting for incoming connections. |
+| `time_wait` | Closed connections waiting before their resources are fully released. |
+| `close_wait` | Connections waiting for the local application to close them. |
+| `syn_sent` | Outgoing connections waiting for a response. |
+| `syn_recv` | Incoming connections waiting for handshake completion. |
+
+#### Kernel Metrics
+
+| Metric | Description | Type |
+|---|---|---|
+| `heka_kernel_context_switches_total` | Total times the kernel switched execution between tasks. | Counter |
+| `heka_kernel_running_tasks` | Number of tasks currently running or ready to run. | Gauge |
+| `heka_kernel_blocked_tasks` | Number of tasks waiting for disk or other I/O operations. | Gauge |
+
+#### Memory Metrics
+
+| Metric | Description | Type |
+|---|---|---|
+| `heka_memory_dirty_bytes` | Memory containing changes waiting to be written to storage. | Gauge |
+| `heka_memory_writeback_bytes` | Memory currently being written to storage. | Gauge |
+
+#### Process Resource Limits
+
+| Metric | Description | Type | Attributes |
+|---|---|---|---|
+| `heka_process_limit_open_files` | Maximum file descriptors a monitored process can open. | Gauge | `pid`, `process_name`, `limit` |
+| `heka_process_limit_max_processes` | Configured process and thread limit for the process's real user. | Gauge | `pid`, `process_name`, `limit` |
+
+The `limit` attribute can be:
+
+- `soft`: Currently enforced resource limit.
+- `hard`: Maximum value to which the soft limit can generally be raised.
+
+Resource limits are collected for the union of the top 10 CPU and top 10
+memory processes, with up to 20 unique PIDs.
+
+#### Linux Pressure Stall Information (PSI)
+
+Linux PSI measures how much time workloads lose waiting for CPU, memory, or I/O resources.
+
+| Metric | Description | Type | Attributes |
+|---|---|---|---|
+| `heka_psi_pressure_percent` | Percentage of time workloads experience resource pressure across selected time windows. | Gauge | `resource`, `stall`, `window` |
+| `heka_psi_stall_time_microseconds_total` | Cumulative time workloads spend stalled by resource contention, measured in microseconds. | Counter | `resource`, `stall` |
+
+| Attribute | Value | Description |
+|---|---|---|
+| `resource` | `cpu` | Pressure caused by CPU contention. |
+| `resource` | `memory` | Pressure caused by memory contention. |
+| `resource` | `io` | Pressure caused by input/output operations. |
+| `stall` | `some` | At least one task is stalled by resource contention. |
+| `stall` | `full` | All non-idle tasks are stalled by resource contention. |
+| `window` | `avg10` | Average resource pressure over the last 10 seconds. |
+| `window` | `avg60` | Average resource pressure over the last 60 seconds. |
+| `window` | `avg300` | Average resource pressure over the last 300 seconds. |
+
+`full` measurements are exported only when provided by the Linux kernel.
+
 The purpose is to emit telemetry in a **unified data format** so it can later be:
 
 * transformed for backend-specific ingestion
@@ -358,6 +431,7 @@ Set values in `./.env`:
 ```env
 LOG_LOCATION=./log/heka_agent.log
 CPU_POLL_INTERVAL_SECONDS=10
+PROC_POLL_INTERVAL_SECONDS=30
 PSI_POLL_INTERVAL_SECONDS=30
 EXPORTER_TYPE=otlp_http
 OTLP_HTTP_ENDPOINT=http://localhost:4318/v1/metrics
@@ -386,10 +460,15 @@ Path to the application log file. Relative paths resolve from the repository roo
 Defines collector loop cadence in seconds. Must be a positive number.
 Invalid values fall back to `5.0` with a warning.
 
-#### `PSI_POLL_INTERVAL_SECONDS`
+#### Linux `/proc` Collection Intervals
 
-Defines the independent Linux PSI collection cadence in seconds. Must be a
-finite positive number. Invalid values fall back to `30.0` with a warning.
+| Variable | Default | Description |
+|---|---|---|
+| `PROC_POLL_INTERVAL_SECONDS` | `30` | Interval between Linux `/proc` metric collections, in seconds. |
+| `PSI_POLL_INTERVAL_SECONDS` | `30` | Interval between Linux PSI metric collections, in seconds. |
+
+Both values must be positive numbers. Invalid values fall back to their
+defaults with a warning.
 
 #### `EXPORTER_TYPE`
 
