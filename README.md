@@ -358,6 +358,7 @@ Set values in `./.env`:
 ```env
 LOG_LOCATION=./log/heka_agent.log
 CPU_POLL_INTERVAL_SECONDS=10
+PSI_POLL_INTERVAL_SECONDS=30
 EXPORTER_TYPE=otlp_http
 OTLP_HTTP_ENDPOINT=http://localhost:4318/v1/metrics
 OTLP_HTTP_HEADERS=api-key=replace_me
@@ -384,6 +385,11 @@ Path to the application log file. Relative paths resolve from the repository roo
 
 Defines collector loop cadence in seconds. Must be a positive number.
 Invalid values fall back to `5.0` with a warning.
+
+#### `PSI_POLL_INTERVAL_SECONDS`
+
+Defines the independent Linux PSI collection cadence in seconds. Must be a
+finite positive number. Invalid values fall back to `30.0` with a warning.
 
 #### `EXPORTER_TYPE`
 

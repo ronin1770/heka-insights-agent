@@ -44,6 +44,16 @@ class _FakeProcCollector:
         return dict(self._payload)
 
 
+class _FakePSICollector(_FakeCollector):
+    def __init__(self, payload: dict[str, object]) -> None:
+        super().__init__(payload)
+        self.collect_calls = 0
+
+    def collect(self) -> dict[str, object]:
+        self.collect_calls += 1
+        return super().collect()
+
+
 class _FakeTicker:
     def __init__(self, *, interval_seconds: float) -> None:
         del interval_seconds
@@ -77,16 +87,19 @@ class MainLoopTests(unittest.TestCase):
             {"processes": [], "network": {}}
         )
         proc_collector = _FakeProcCollector({})
+        psi_collector = _FakePSICollector({})
 
         with (
             patch.object(main, "get_cpu_poll_interval_seconds", return_value=5.0),
             patch.object(main, "get_process_poll_interval_seconds", return_value=30.0),
             patch.object(main, "get_proc_poll_interval_seconds", return_value=30.0),
+            patch.object(main, "get_psi_poll_interval_seconds", return_value=30.0),
             patch.object(main, "CPUCollector", return_value=_FakeCollector(cpu_payload)),
             patch.object(main, "MemoryCollector", return_value=_FakeCollector(memory_payload)),
             patch.object(main, "DiskCollector", return_value=_FakeCollector(disk_payload)),
             patch.object(main, "ProcessCollector", return_value=process_collector),
             patch.object(main, "ProcCollector", return_value=proc_collector),
+            patch.object(main, "PSICollector", return_value=psi_collector),
             patch.object(main, "MonotonicTicker", _FakeTicker),
             patch.object(main, "build_canonical_metrics", return_value=[{"name": "metric"}]),
         ):
@@ -111,12 +124,14 @@ class MainLoopTests(unittest.TestCase):
         process_collector = _FakeProcessCollector(process_payload)
         proc_payload = {"tcp": {"listen": 1}}
         proc_collector = _FakeProcCollector(proc_payload)
+        psi_collector = _FakePSICollector({})
         build_metrics = Mock(return_value=[])
 
         with (
             patch.object(main, "get_cpu_poll_interval_seconds", return_value=5.0),
             patch.object(main, "get_process_poll_interval_seconds", return_value=30.0),
             patch.object(main, "get_proc_poll_interval_seconds", return_value=30.0),
+            patch.object(main, "get_psi_poll_interval_seconds", return_value=30.0),
             patch.object(
                 main,
                 "CPUCollector",
@@ -126,6 +141,7 @@ class MainLoopTests(unittest.TestCase):
             patch.object(main, "DiskCollector", return_value=_FakeCollector({})),
             patch.object(main, "ProcessCollector", return_value=process_collector),
             patch.object(main, "ProcCollector", return_value=proc_collector),
+            patch.object(main, "PSICollector", return_value=psi_collector),
             patch.object(main, "MonotonicTicker", _FakeTicker),
             patch.object(main, "build_canonical_metrics", build_metrics),
             patch.object(main.time, "monotonic", side_effect=(0.0, 10.0, 31.0)),
@@ -143,6 +159,7 @@ class MainLoopTests(unittest.TestCase):
         first_payloads = build_metrics.call_args_list[0].args[0]
         second_payloads = build_metrics.call_args_list[1].args[0]
         self.assertNotIn("process", first_payloads)
+        self.assertNotIn("psi", first_payloads)
         self.assertEqual(second_payloads["process"], process_payload)
         self.assertEqual(second_payloads["proc"], proc_payload)
         self.assertEqual(exporter.export.call_args_list, [call([]), call([])])
@@ -154,12 +171,14 @@ class MainLoopTests(unittest.TestCase):
             {"processes": [], "network": {}}
         )
         proc_collector = _FakeProcCollector({"kernel": {"running_tasks": 1}})
+        psi_collector = _FakePSICollector({})
         build_metrics = Mock(return_value=[])
 
         with (
             patch.object(main, "get_cpu_poll_interval_seconds", return_value=5.0),
             patch.object(main, "get_process_poll_interval_seconds", return_value=60.0),
             patch.object(main, "get_proc_poll_interval_seconds", return_value=30.0),
+            patch.object(main, "get_psi_poll_interval_seconds", return_value=30.0),
             patch.object(
                 main,
                 "CPUCollector",
@@ -169,6 +188,7 @@ class MainLoopTests(unittest.TestCase):
             patch.object(main, "DiskCollector", return_value=_FakeCollector({})),
             patch.object(main, "ProcessCollector", return_value=process_collector),
             patch.object(main, "ProcCollector", return_value=proc_collector),
+            patch.object(main, "PSICollector", return_value=psi_collector),
             patch.object(main, "MonotonicTicker", _FakeTicker),
             patch.object(main, "build_canonical_metrics", build_metrics),
             patch.object(main.time, "monotonic", side_effect=(0.0, 10.0, 31.0)),
@@ -184,6 +204,54 @@ class MainLoopTests(unittest.TestCase):
         self.assertEqual(proc_collector.calls, [[]])
         self.assertNotIn("proc", build_metrics.call_args_list[0].args[0])
         self.assertIn("proc", build_metrics.call_args_list[1].args[0])
+
+    def test_psi_collection_is_immediate_independent_and_omits_empty_payload(self) -> None:
+        logger = Mock()
+        exporter = Mock()
+        process_collector = _FakeProcessCollector({"processes": [], "network": {}})
+        proc_collector = _FakeProcCollector({})
+        psi_payload = {
+            "cpu": {
+                "some": {
+                    "avg10": 0.25,
+                    "avg60": 0.15,
+                    "avg300": 0.05,
+                    "total": 1234567,
+                }
+            }
+        }
+        psi_collector = _FakePSICollector(psi_payload)
+        build_metrics = Mock(return_value=[])
+
+        with (
+            patch.object(main, "get_cpu_poll_interval_seconds", return_value=5.0),
+            patch.object(main, "get_process_poll_interval_seconds", return_value=60.0),
+            patch.object(main, "get_proc_poll_interval_seconds", return_value=60.0),
+            patch.object(main, "get_psi_poll_interval_seconds", return_value=30.0),
+            patch.object(
+                main,
+                "CPUCollector",
+                return_value=_FakeCollector({"warming_up": True}),
+            ),
+            patch.object(main, "MemoryCollector", return_value=_FakeCollector({})),
+            patch.object(main, "DiskCollector", return_value=_FakeCollector({})),
+            patch.object(main, "ProcessCollector", return_value=process_collector),
+            patch.object(main, "ProcCollector", return_value=proc_collector),
+            patch.object(main, "PSICollector", return_value=psi_collector),
+            patch.object(main, "MonotonicTicker", _FakeTicker),
+            patch.object(main, "build_canonical_metrics", build_metrics),
+            patch.object(main.time, "monotonic", side_effect=(0.0, 1.0, 29.0)),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                main.run_collectors_loop(
+                    exporter=exporter,
+                    exporter_type="otlp_http",
+                    logger=logger,
+                )
+
+        self.assertEqual(psi_collector.collect_calls, 1)
+        self.assertEqual(build_metrics.call_args_list[0].args[0]["psi"], psi_payload)
+        self.assertNotIn("psi", build_metrics.call_args_list[1].args[0])
 
 
 if __name__ == "__main__":
