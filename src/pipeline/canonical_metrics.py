@@ -153,6 +153,16 @@ _METRIC_META: dict[str, _MetricMeta] = {
         metric_type="gauge",
         unit="count",
     ),
+    "heka_psi_pressure_percent": _MetricMeta(
+        description="Linux pressure stall average as a percentage.",
+        metric_type="gauge",
+        unit="percent",
+    ),
+    "heka_psi_stall_time_microseconds_total": _MetricMeta(
+        description="Cumulative Linux pressure stall time in microseconds.",
+        metric_type="counter",
+        unit="microseconds",
+    ),
 }
 
 
@@ -167,6 +177,7 @@ def build_canonical_metrics(
     disk_payload = payloads.get("disk")
     process_payload = payloads.get("process")
     proc_payload = payloads.get("proc")
+    psi_payload = payloads.get("psi")
 
     if not isinstance(cpu_payload, Mapping):
         raise ValueError("payloads['cpu'] must be a mapping")
@@ -191,7 +202,45 @@ def build_canonical_metrics(
             proc_payload,
             timestamp_unix_ms=timestamp_unix_ms,
         )
+    if isinstance(psi_payload, Mapping):
+        _collect_psi_metrics(
+            metrics,
+            psi_payload,
+            timestamp_unix_ms=timestamp_unix_ms,
+        )
     return metrics
+
+
+def _collect_psi_metrics(
+    metrics: list[CanonicalMetric],
+    psi_payload: Mapping[str, Any],
+    *,
+    timestamp_unix_ms: int | None,
+) -> None:
+    for resource in ("cpu", "memory", "io"):
+        resource_values = psi_payload.get(resource)
+        if not isinstance(resource_values, Mapping):
+            continue
+        for stall in ("some", "full"):
+            stall_values = resource_values.get(stall)
+            if not isinstance(stall_values, Mapping):
+                continue
+            labels = {"resource": resource, "stall": stall}
+            for window in ("avg10", "avg60", "avg300"):
+                _append_if_numeric(
+                    metrics,
+                    name="heka_psi_pressure_percent",
+                    value=stall_values.get(window),
+                    labels={**labels, "window": window},
+                    timestamp_unix_ms=timestamp_unix_ms,
+                )
+            _append_if_numeric(
+                metrics,
+                name="heka_psi_stall_time_microseconds_total",
+                value=stall_values.get("total"),
+                labels=labels,
+                timestamp_unix_ms=timestamp_unix_ms,
+            )
 
 
 def _collect_cpu_metrics(

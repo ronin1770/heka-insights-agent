@@ -45,6 +45,7 @@ The packaged runtime uses:
 |---|---|---|---|
 | `LOG_LOCATION` | absolute path | none (required) | Startup fails if missing, empty, relative, or unwritable |
 | `CPU_POLL_INTERVAL_SECONDS` | float (`> 0`) | `5.0` | Invalid values fall back to default with warning |
+| `PSI_POLL_INTERVAL_SECONDS` | finite float (`> 0`) | `30.0` | Invalid values fall back to default with warning |
 | `EXPORTER_TYPE` | enum | `console` | Supported: `console`, `otlp_http`, `datadog_otlp`, `datadog_native`, `newrelic_otlp` |
 | `OTLP_HTTP_ENDPOINT` | absolute URL (`http/https`) | none | Required when `EXPORTER_TYPE=otlp_http` |
 | `OTLP_HTTP_HEADERS` | `key=value` pairs | empty | Optional headers for OTLP HTTP-based exporters |
@@ -110,6 +111,7 @@ The packaged runtime uses:
 ```env
 LOG_LOCATION=/var/log/heka-insights-agent/agent.log
 CPU_POLL_INTERVAL_SECONDS=10
+PSI_POLL_INTERVAL_SECONDS=30
 EXPORTER_TYPE=otlp_http
 OTLP_HTTP_ENDPOINT=http://localhost:4318/v1/metrics
 OTLP_HTTP_HEADERS=api-key=replace_me

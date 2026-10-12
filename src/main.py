@@ -18,6 +18,7 @@ from config import (
     ExporterType,
     get_cpu_poll_interval_seconds,
     get_exporter_type,
+    get_psi_poll_interval_seconds,
     get_proc_poll_interval_seconds,
     get_process_poll_interval_seconds,
 )
@@ -26,6 +27,7 @@ from collectors.disk import DiskCollector
 from collectors.memory import MemoryCollector
 from collectors.process import ProcessCollector
 from collectors.proc import ProcCollector
+from collectors.psi import PSICollector
 from exporters import Exporter, create_exporter
 from logger.config import get_logger
 from pipeline import build_canonical_metrics
@@ -42,25 +44,30 @@ def run_collectors_loop(
     interval_seconds = get_cpu_poll_interval_seconds(logger=logger)
     process_interval_seconds = get_process_poll_interval_seconds(logger=logger)
     proc_interval_seconds = get_proc_poll_interval_seconds(logger=logger)
+    psi_interval_seconds = get_psi_poll_interval_seconds(logger=logger)
     cpu_collector = CPUCollector(per_cpu=False, detail="detailed")
     memory_collector = MemoryCollector(detail="detailed")
     disk_collector = DiskCollector(detail="detailed")
     process_collector = ProcessCollector()
     proc_collector = ProcCollector()
+    psi_collector = PSICollector(logger=logger)
     process_collector.prime()
     schedule_started = time.monotonic()
     next_process_collection = schedule_started + process_interval_seconds
     next_proc_collection = schedule_started + proc_interval_seconds
+    next_psi_collection = schedule_started
     selected_processes: list[dict[str, object]] = []
     ticker = MonotonicTicker(interval_seconds=interval_seconds)
 
     logger.info(
-        "CPU, memory, disk, process, and procfs collectors initialized | "
+        "CPU, memory, disk, process, procfs, and PSI collectors initialized | "
         "interval_seconds=%.1f | process_interval_seconds=%.1f | "
-        "proc_interval_seconds=%.1f | exporter_type=%s",
+        "proc_interval_seconds=%.1f | psi_interval_seconds=%.1f | "
+        "exporter_type=%s",
         interval_seconds,
         process_interval_seconds,
         proc_interval_seconds,
+        psi_interval_seconds,
         exporter_type,
     )
 
@@ -99,6 +106,14 @@ def run_collectors_loop(
             logger.info("Procfs metrics: %s", proc_payload)
             while next_proc_collection <= current_monotonic:
                 next_proc_collection += proc_interval_seconds
+
+        if current_monotonic >= next_psi_collection:
+            psi_payload = psi_collector.collect()
+            if psi_payload:
+                payloads["psi"] = psi_payload
+                logger.info("PSI metrics: %s", psi_payload)
+            while next_psi_collection <= current_monotonic:
+                next_psi_collection += psi_interval_seconds
 
         canonical_metrics = build_canonical_metrics(
             payloads,
