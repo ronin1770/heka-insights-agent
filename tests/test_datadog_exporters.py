@@ -233,7 +233,8 @@ class DatadogExporterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "non-success status code 500"):
             sender.send({"series": []})
-        logger.debug.assert_called_once()
+        # Default retry behavior makes four retry log calls plus one terminal failure.
+        self.assertEqual(logger.debug.call_count, 5)
 
     def test_native_sender_retries_429_with_same_payload_and_agent_id(self) -> None:
         sleeps: list[float] = []

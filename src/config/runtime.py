@@ -48,6 +48,19 @@ DATADOG_METRIC_PREFIX_ENV_KEY = "DATADOG_METRIC_PREFIX"
 HEKA_INTELLIGENCE_ENABLED_ENV_KEY = "HEKA_INTELLIGENCE_ENABLED"
 HEKA_AGENT_ID_ENV_KEY = "HEKA_AGENT_ID"
 HEKA_API_KEY_ENV_KEY = "HEKA_API_KEY"
+HEKA_EXPORT_QUEUE_MAX_BATCHES_ENV_KEY = "HEKA_EXPORT_QUEUE_MAX_BATCHES"
+HEKA_EXPORT_QUEUE_MAX_BYTES_ENV_KEY = "HEKA_EXPORT_QUEUE_MAX_BYTES"
+HEKA_EXPORT_QUEUE_OVERFLOW_POLICY_ENV_KEY = "HEKA_EXPORT_QUEUE_OVERFLOW_POLICY"
+HEKA_EXPORT_MAX_BATCH_AGE_SECONDS_ENV_KEY = "HEKA_EXPORT_MAX_BATCH_AGE_SECONDS"
+HEKA_EXPORT_COOLDOWN_ENABLED_ENV_KEY = "HEKA_EXPORT_COOLDOWN_ENABLED"
+HEKA_EXPORT_SHUTDOWN_TIMEOUT_SECONDS_ENV_KEY = "HEKA_EXPORT_SHUTDOWN_TIMEOUT_SECONDS"
+HEKA_AGENT_DIAGNOSTICS_ENABLED_ENV_KEY = "HEKA_AGENT_DIAGNOSTICS_ENABLED"
+HEKA_AGENT_DIAGNOSTICS_INTERVAL_SECONDS_ENV_KEY = "HEKA_AGENT_DIAGNOSTICS_INTERVAL_SECONDS"
+HEKA_AGENT_TRACEMALLOC_ENABLED_ENV_KEY = "HEKA_AGENT_TRACEMALLOC_ENABLED"
+HEKA_LOG_LEVEL_ENV_KEY = "HEKA_LOG_LEVEL"
+HEKA_LOG_MAX_BYTES_ENV_KEY = "HEKA_LOG_MAX_BYTES"
+HEKA_LOG_BACKUP_COUNT_ENV_KEY = "HEKA_LOG_BACKUP_COUNT"
+HEKA_LOG_PAYLOADS_ENABLED_ENV_KEY = "HEKA_LOG_PAYLOADS_ENABLED"
 
 DEFAULT_CPU_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_OTLP_HTTP_TIMEOUT_SECONDS = 10
@@ -56,6 +69,14 @@ DEFAULT_OTLP_HTTP_RETRY_INITIAL_BACKOFF_SECONDS = 1.0
 DEFAULT_OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS = 5.0
 DEFAULT_OTLP_RETRY_AFTER_DEFAULT_SECONDS = 5
 DEFAULT_OTLP_RETRY_AFTER_MAX_SECONDS = 300
+DEFAULT_EXPORT_QUEUE_MAX_BATCHES = 64
+DEFAULT_EXPORT_QUEUE_MAX_BYTES = 8 * 1024 * 1024
+DEFAULT_EXPORT_MAX_BATCH_AGE_SECONDS = 120.0
+DEFAULT_EXPORT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+DEFAULT_AGENT_DIAGNOSTICS_INTERVAL_SECONDS = 60.0
+DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 3
 
 ExporterType = Literal[
     "console",
@@ -99,6 +120,84 @@ def get_log_location() -> Path:
             f"{LOG_LOCATION_ENV_KEY} must be an absolute path for packaged runtime."
         )
     return env_path
+
+
+def get_export_queue_max_batches() -> int:
+    return _get_strict_positive_int(
+        HEKA_EXPORT_QUEUE_MAX_BATCHES_ENV_KEY, DEFAULT_EXPORT_QUEUE_MAX_BATCHES
+    )
+
+
+def get_export_queue_max_bytes() -> int:
+    return _get_strict_positive_int(
+        HEKA_EXPORT_QUEUE_MAX_BYTES_ENV_KEY, DEFAULT_EXPORT_QUEUE_MAX_BYTES
+    )
+
+
+def get_export_queue_overflow_policy() -> str:
+    value = os.getenv(HEKA_EXPORT_QUEUE_OVERFLOW_POLICY_ENV_KEY, "drop_oldest").strip().lower()
+    if value != "drop_oldest":
+        _raise_config_error(
+            env_key=HEKA_EXPORT_QUEUE_OVERFLOW_POLICY_ENV_KEY,
+            detail="only 'drop_oldest' is supported.", logger=None,
+        )
+    return value
+
+
+def get_export_max_batch_age_seconds() -> float:
+    return _get_strict_positive_float(
+        HEKA_EXPORT_MAX_BATCH_AGE_SECONDS_ENV_KEY, DEFAULT_EXPORT_MAX_BATCH_AGE_SECONDS
+    )
+
+
+def get_export_cooldown_enabled() -> bool:
+    return _get_strict_bool(HEKA_EXPORT_COOLDOWN_ENABLED_ENV_KEY, True)
+
+
+def get_export_shutdown_timeout_seconds() -> float:
+    return _get_strict_positive_float(
+        HEKA_EXPORT_SHUTDOWN_TIMEOUT_SECONDS_ENV_KEY,
+        DEFAULT_EXPORT_SHUTDOWN_TIMEOUT_SECONDS,
+    )
+
+
+def get_agent_diagnostics_enabled() -> bool:
+    return _get_strict_bool(HEKA_AGENT_DIAGNOSTICS_ENABLED_ENV_KEY, False)
+
+
+def get_agent_diagnostics_interval_seconds() -> float:
+    return _get_strict_positive_float(
+        HEKA_AGENT_DIAGNOSTICS_INTERVAL_SECONDS_ENV_KEY,
+        DEFAULT_AGENT_DIAGNOSTICS_INTERVAL_SECONDS,
+    )
+
+
+def get_agent_tracemalloc_enabled() -> bool:
+    return _get_strict_bool(HEKA_AGENT_TRACEMALLOC_ENABLED_ENV_KEY, False)
+
+
+def get_log_level() -> int:
+    value = os.getenv(HEKA_LOG_LEVEL_ENV_KEY, DEFAULT_LOG_LEVEL).strip().upper()
+    if value not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        _raise_config_error(
+            env_key=HEKA_LOG_LEVEL_ENV_KEY,
+            detail="expected DEBUG, INFO, WARNING, ERROR, or CRITICAL.", logger=None,
+        )
+    return int(getattr(logging, value))
+
+
+def get_log_max_bytes() -> int:
+    return _get_strict_positive_int(HEKA_LOG_MAX_BYTES_ENV_KEY, DEFAULT_LOG_MAX_BYTES)
+
+
+def get_log_backup_count() -> int:
+    return _get_strict_positive_int(
+        HEKA_LOG_BACKUP_COUNT_ENV_KEY, DEFAULT_LOG_BACKUP_COUNT
+    )
+
+
+def get_log_payloads_enabled() -> bool:
+    return _get_strict_bool(HEKA_LOG_PAYLOADS_ENABLED_ENV_KEY, False)
 
 
 def get_cpu_poll_interval_seconds(
@@ -689,6 +788,46 @@ def _get_non_negative_int_with_default(
         logger=logger,
     )
     return default_value
+
+
+def _get_strict_positive_int(env_key: str, default_value: int) -> int:
+    raw = os.getenv(env_key, "").strip()
+    if not raw:
+        return default_value
+    try:
+        value = int(raw)
+        if value > 0:
+            return value
+    except ValueError:
+        pass
+    _raise_config_error(env_key=env_key, detail="expected a positive integer.", logger=None)
+
+
+def _get_strict_positive_float(env_key: str, default_value: float) -> float:
+    raw = os.getenv(env_key, "").strip()
+    if not raw:
+        return default_value
+    try:
+        value = float(raw)
+        if value > 0 and value < float("inf"):
+            return value
+    except ValueError:
+        pass
+    _raise_config_error(env_key=env_key, detail="expected a finite positive number.", logger=None)
+
+
+def _get_strict_bool(env_key: str, default_value: bool) -> bool:
+    raw = os.getenv(env_key, "").strip().lower()
+    if not raw:
+        return default_value
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    _raise_config_error(
+        env_key=env_key,
+        detail="expected one of: 1,true,yes,on,0,false,no,off.", logger=None,
+    )
 
 
 def _warn_invalid_config_with_default(

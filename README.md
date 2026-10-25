@@ -430,6 +430,10 @@ Set values in `./.env`:
 
 ```env
 LOG_LOCATION=./log/heka_agent.log
+HEKA_LOG_LEVEL=INFO
+HEKA_LOG_MAX_BYTES=10485760
+HEKA_LOG_BACKUP_COUNT=3
+HEKA_LOG_PAYLOADS_ENABLED=false
 CPU_POLL_INTERVAL_SECONDS=10
 PROC_POLL_INTERVAL_SECONDS=30
 PSI_POLL_INTERVAL_SECONDS=30
@@ -441,6 +445,15 @@ OTLP_HTTP_TIMEOUT_SECONDS=10
 OTLP_HTTP_RETRY_MAX_ATTEMPTS=5
 OTLP_HTTP_RETRY_INITIAL_BACKOFF_SECONDS=1
 OTLP_HTTP_RETRY_MAX_BACKOFF_SECONDS=5
+HEKA_EXPORT_QUEUE_MAX_BATCHES=64
+HEKA_EXPORT_QUEUE_MAX_BYTES=8388608
+HEKA_EXPORT_QUEUE_OVERFLOW_POLICY=drop_oldest
+HEKA_EXPORT_MAX_BATCH_AGE_SECONDS=120
+HEKA_EXPORT_COOLDOWN_ENABLED=true
+HEKA_EXPORT_SHUTDOWN_TIMEOUT_SECONDS=5
+HEKA_AGENT_DIAGNOSTICS_ENABLED=false
+HEKA_AGENT_DIAGNOSTICS_INTERVAL_SECONDS=60
+HEKA_AGENT_TRACEMALLOC_ENABLED=false
 # New Relic OTLP preset (optional)
 NEWRELIC_OTLP_ENDPOINT=https://otlp.nr-data.net/v1/metrics
 NEWRELIC_API_KEY=replace_with_new_relic_license_key
@@ -454,6 +467,29 @@ NEWRELIC_HOST_NAME=localhost
 #### `LOG_LOCATION`
 
 Path to the application log file. Relative paths resolve from the repository root.
+
+#### Export reliability, diagnostics, and log retention
+
+All background HTTP exporters retain at most 64 batches and 8 MiB of serialized
+request bodies by default, including the active request. Congestion evicts the oldest
+pending batch while preserving the active request and fresher telemetry. Configure this
+with `HEKA_EXPORT_QUEUE_MAX_BATCHES`, `HEKA_EXPORT_QUEUE_MAX_BYTES`,
+`HEKA_EXPORT_MAX_BATCH_AGE_SECONDS`, and `HEKA_EXPORT_SHUTDOWN_TIMEOUT_SECONDS`.
+`HEKA_EXPORT_QUEUE_OVERFLOW_POLICY` currently accepts only `drop_oldest`.
+
+Endpoint-wide HTTP 429 cooldown is enabled by default through
+`HEKA_EXPORT_COOLDOWN_ENABLED`; existing OTLP retry variables and defaults are unchanged.
+
+Local self-diagnostics are disabled by default. Enable them with
+`HEKA_AGENT_DIAGNOSTICS_ENABLED=true`; control cadence with
+`HEKA_AGENT_DIAGNOSTICS_INTERVAL_SECONDS`, and opt into Python allocation tracing with
+`HEKA_AGENT_TRACEMALLOC_ENABLED=true`. Diagnostics are written locally and never exported.
+
+Logs default to INFO with a 10 MiB active file and three backups. Configure
+`HEKA_LOG_LEVEL`, `HEKA_LOG_MAX_BYTES`, and `HEKA_LOG_BACKUP_COUNT`. Complete collector
+payload logging requires both DEBUG level and `HEKA_LOG_PAYLOADS_ENABLED=true`.
+See [Issue #33 exporter reliability](docs/issue-33-export-reliability.md) for accounting
+and shutdown semantics.
 
 #### `CPU_POLL_INTERVAL_SECONDS`
 

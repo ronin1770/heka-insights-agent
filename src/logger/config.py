@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import logging
+from logging.handlers import RotatingFileHandler
 import sys
 
 from config import get_log_location
+from config.runtime import (
+    get_log_backup_count,
+    get_log_level,
+    get_log_max_bytes,
+)
 
 LOG_FORMAT = "%(filename)s - %(asctime)s | %(levelname)s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d-%H-%M-%S"
@@ -46,13 +52,21 @@ def get_logger(name: str = "heka_insights_agent") -> logging.Logger:
     except OSError as exc:
         raise RuntimeError(f"Unable to initialize log file at '{log_path}': {exc}") from exc
 
-    handler = logging.FileHandler(log_path, encoding="utf-8")
+    level = get_log_level()
+    handler = RotatingFileHandler(
+        log_path,
+        maxBytes=get_log_max_bytes(),
+        backupCount=get_log_backup_count(),
+        encoding="utf-8",
+    )
     handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
+    handler.setLevel(level)
 
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setFormatter(ColorFormatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
+    console_handler.setLevel(level)
 
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(level)
     logger.addHandler(handler)
     logger.addHandler(console_handler)
     logger.propagate = False

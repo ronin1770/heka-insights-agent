@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+from email.utils import format_datetime
 import sys
 import unittest
 from pathlib import Path
@@ -12,6 +14,7 @@ from urllib.error import URLError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from exporters.http_common import parse_retry_after_delay
+from exporters.http_common import BatchExpiredError
 from exporters.otlp_http import OtlpHttpMetricSender
 
 
@@ -256,7 +259,8 @@ class OtlpHttpMetricSenderTests(unittest.TestCase):
         )
         sender.send({"resourceMetrics": [{"scopeMetrics": []}]})
 
-        self.assertEqual(sleeps, [20])
+        self.assertEqual(len(sleeps), 1)
+        self.assertAlmostEqual(sleeps[0], 20, delta=0.01)
         self.assertEqual(len(requests), 2)
         self.assertEqual(requests[0][0], requests[1][0])
         self.assertEqual(requests[0][1]["x-agent-id"], requests[1][1]["x-agent-id"])
@@ -299,6 +303,62 @@ class OtlpHttpMetricSenderTests(unittest.TestCase):
         self.assertEqual(negative.seconds, 5)
         self.assertFalse(zero.default_used)
         self.assertEqual(zero.seconds, 0)
+
+    def test_retry_after_parser_supports_http_date(self) -> None:
+        now = datetime(2026, 10, 23, 10, 0, tzinfo=timezone.utc)
+        value = format_datetime(datetime(2026, 10, 23, 10, 1, tzinfo=timezone.utc), usegmt=True)
+        parsed = parse_retry_after_delay(
+            headers={"Retry-After": value},
+            default_seconds=5,
+            max_seconds=300,
+            wall_time_fn=lambda: now.timestamp(),
+        )
+        self.assertEqual(parsed.seconds, 60)
+        self.assertEqual(parsed.source, "http-date")
+        self.assertFalse(parsed.default_used)
+
+    def test_final_429_cooldown_applies_to_next_batch(self) -> None:
+        sleeps: list[float] = []
+        responses = [
+            _FakeResponse(status=429, headers={"Retry-After": "20"}),
+            _FakeResponse(status=200),
+        ]
+        requests = {"count": 0}
+
+        def client(request, timeout):
+            del request, timeout
+            response = responses[requests["count"]]
+            requests["count"] += 1
+            return response
+
+        sender = OtlpHttpMetricSender(
+            endpoint="https://collector.example.com/v1/metrics",
+            retry_max_attempts=1,
+            headers={"x-agent-id": "agt_01JXYZ123"},
+            http_client=client,
+            sleep_fn=self._async_sleep_recorder(sleeps),
+        )
+        with self.assertRaisesRegex(RuntimeError, "status code 429"):
+            sender.send({"batch": 1})
+        sender.send({"batch": 2})
+        self.assertEqual(len(sleeps), 1)
+        self.assertAlmostEqual(sleeps[0], 20, delta=0.01)
+        self.assertEqual(requests["count"], 2)
+
+    def test_expired_batch_does_not_bypass_active_cooldown(self) -> None:
+        sender = OtlpHttpMetricSender(
+            endpoint="https://collector.example.com/v1/metrics",
+            retry_max_attempts=1,
+            headers={"x-agent-id": "agt_01JXYZ123"},
+            http_client=lambda request, timeout: _FakeResponse(
+                status=429, headers={"Retry-After": "20"}
+            ),
+            sleep_fn=self._async_sleep_recorder([]),
+        )
+        with self.assertRaises(RuntimeError):
+            sender.send({"batch": 1})
+        with self.assertRaises(BatchExpiredError):
+            sender.send_serialized(b"{}", expires_at=0.0)
 
     def test_rejects_invalid_endpoint(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "Invalid OTLP HTTP endpoint"):

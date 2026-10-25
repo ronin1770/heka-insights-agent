@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import json
 import logging
 import threading
@@ -23,10 +24,21 @@ from config import (
     get_otlp_retry_after_default_seconds,
     get_otlp_retry_after_max_seconds,
 )
+from config.runtime import (
+    get_export_cooldown_enabled,
+    get_export_max_batch_age_seconds,
+    get_export_queue_max_batches,
+    get_export_queue_max_bytes,
+    get_export_queue_overflow_policy,
+    get_export_shutdown_timeout_seconds,
+)
 
 from .base import CanonicalMetricCollection, Exporter
 from .http_common import (
+    BatchExpiredError,
     BackgroundPayloadDispatcher,
+    EndpointCooldown,
+    ExportStatistics,
     ShutdownRequestedError,
     SleepFn,
     mask_identifier,
@@ -226,6 +238,8 @@ class DatadogMetricSender:
         http_client: Callable[..., Any] | None = None,
         sleep_fn: SleepFn | None = None,
         shutdown_event: threading.Event | None = None,
+        cooldown_enabled: bool = True,
+        statistics: ExportStatistics | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._endpoint = endpoint.strip()
@@ -246,16 +260,34 @@ class DatadogMetricSender:
         self._http_client = http_client or urlopen
         self._sleep_fn = sleep_fn
         self._shutdown_event = shutdown_event or threading.Event()
+        self._statistics = statistics
+        self._cooldown = EndpointCooldown(enabled=cooldown_enabled, statistics=statistics)
+        self._expires_at: ContextVar[float | None] = ContextVar(
+            "datadog_batch_expires_at", default=None
+        )
         self._logger = logger
+        self._last_warning_at = float("-inf")
         self._validate_retry_policy()
         self._validate_endpoint()
 
     def send(self, payload: Mapping[str, Any]) -> None:
         """POST a Datadog metrics payload."""
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        asyncio.run(self._send_async(body))
+        self.send_serialized(body)
 
-    async def _send_async(self, body: bytes) -> None:
+    def send_serialized(self, body: bytes, *, expires_at: float | None = None) -> None:
+        """POST an already serialized Datadog request body."""
+        token = self._expires_at.set(expires_at)
+        try:
+            asyncio.run(self._send_async(body, expires_at=expires_at))
+        finally:
+            self._expires_at.reset(token)
+
+    def refresh_diagnostics(self) -> None:
+        """Refresh time-dependent cooldown gauges."""
+        self._cooldown.remaining()
+
+    async def _send_async(self, body: bytes, *, expires_at: float | None = None) -> None:
         batch_started = time.monotonic()
         masked_agent_id = mask_identifier(self._agent_id)
         self._ensure_agent_id_configured(masked_agent_id=masked_agent_id)
@@ -265,6 +297,24 @@ class DatadogMetricSender:
                 raise ShutdownRequestedError(
                     "Shutdown requested before Datadog native export."
                 )
+            cooldown = self._cooldown.remaining()
+            if cooldown > 0:
+                if expires_at is not None:
+                    remaining_lifetime = expires_at - time.monotonic()
+                    if remaining_lifetime <= 0:
+                        raise BatchExpiredError("Datadog batch expired before export.")
+                    cooldown = min(cooldown, remaining_lifetime)
+                await sleep_with_shutdown(
+                    seconds=cooldown,
+                    shutdown_event=self._shutdown_event,
+                    sleep_fn=self._sleep_fn,
+                )
+            if expires_at is not None and time.monotonic() >= expires_at:
+                raise BatchExpiredError("Datadog batch expired before export.")
+            if cooldown > 0:
+                self._cooldown.complete_wait()
+            if self._statistics is not None:
+                self._statistics.increment("request_attempts")
 
             request = self._build_request(body)
             request_started = time.monotonic()
@@ -315,14 +365,17 @@ class DatadogMetricSender:
                     f"Datadog native export failed with HTTP error {exc.code}: "
                     f"{exc.reason}."
                 ) from exc
-            except URLError as exc:
+            except (URLError, TimeoutError, OSError) as exc:
+                if self._statistics is not None:
+                    self._statistics.increment("network_failures")
+                reason = getattr(exc, "reason", str(exc))
                 request_ms = (time.monotonic() - request_started) * 1000.0
                 if self._should_retry(status_code=None, attempt=attempt):
                     self._log_retry(
                         status_code="transport",
                         attempt=attempt,
                         request_ms=request_ms,
-                        reason=f"transport_error={exc.reason}",
+                        reason=f"transport_error={reason}",
                         masked_agent_id=masked_agent_id,
                     )
                     await self._sleep_before_retry(attempt=attempt)
@@ -337,11 +390,11 @@ class DatadogMetricSender:
                     request_ms,
                     (time.monotonic() - batch_started) * 1000.0,
                     masked_agent_id,
-                    exc.reason,
+                    reason,
                 )
                 raise RuntimeError(
                     f"Datadog native export failed to reach endpoint '{self._endpoint}': "
-                    f"{exc.reason}."
+                    f"{reason}."
                 ) from exc
 
     def _build_request(self, body: bytes) -> Request:
@@ -363,6 +416,8 @@ class DatadogMetricSender:
         batch_started: float,
         masked_agent_id: str,
     ) -> bool:
+        if self._statistics is not None and 500 <= status_code <= 599:
+            self._statistics.increment("http_5xx_responses")
         if status_code == 429 and self._should_retry(status_code=status_code, attempt=attempt):
             await self._sleep_for_retry_after(
                 headers=headers,
@@ -372,6 +427,15 @@ class DatadogMetricSender:
                 masked_agent_id=masked_agent_id,
             )
             return True
+        if status_code == 429:
+            retry_after = parse_retry_after_delay(
+                headers=headers,
+                default_seconds=self._retry_after_default_seconds,
+                max_seconds=self._retry_after_max_seconds,
+            )
+            self._cooldown.activate(retry_after.seconds)
+            if self._statistics is not None:
+                self._statistics.increment("http_429_responses")
 
         if self._should_retry(status_code=status_code, attempt=attempt):
             self._log_retry(
@@ -406,6 +470,8 @@ class DatadogMetricSender:
         batch_started: float,
         masked_agent_id: str,
     ) -> bool:
+        if self._statistics is not None and 500 <= exc.code <= 599:
+            self._statistics.increment("http_5xx_responses")
         if exc.code == 429 and self._should_retry(status_code=exc.code, attempt=attempt):
             await self._sleep_for_retry_after(
                 headers=exc.headers,
@@ -415,6 +481,15 @@ class DatadogMetricSender:
                 masked_agent_id=masked_agent_id,
             )
             return True
+        if exc.code == 429:
+            retry_after = parse_retry_after_delay(
+                headers=exc.headers,
+                default_seconds=self._retry_after_default_seconds,
+                max_seconds=self._retry_after_max_seconds,
+            )
+            self._cooldown.activate(retry_after.seconds)
+            if self._statistics is not None:
+                self._statistics.increment("http_429_responses")
 
         if self._should_retry(status_code=exc.code, attempt=attempt):
             self._log_retry(
@@ -450,16 +525,14 @@ class DatadogMetricSender:
         return 500 <= status_code <= 599
 
     async def _sleep_before_retry(self, *, attempt: int) -> None:
+        if self._statistics is not None:
+            self._statistics.increment("retry_attempts")
         backoff_seconds = min(
             self._retry_max_backoff_seconds,
             self._retry_initial_backoff_seconds
             * (_RETRY_BACKOFF_MULTIPLIER ** (attempt - 1)),
         )
-        await sleep_with_shutdown(
-            seconds=backoff_seconds,
-            shutdown_event=self._shutdown_event,
-            sleep_fn=self._sleep_fn,
-        )
+        await self._bounded_sleep(backoff_seconds)
 
     async def _sleep_for_retry_after(
         self,
@@ -475,6 +548,10 @@ class DatadogMetricSender:
             default_seconds=self._retry_after_default_seconds,
             max_seconds=self._retry_after_max_seconds,
         )
+        if self._statistics is not None:
+            self._statistics.increment("http_429_responses")
+            self._statistics.increment("retry_attempts")
+        self._cooldown.activate(retry_after.seconds)
         self._logger_warning(
             "Datadog native export rate limited; endpoint=%s status=429 attempt=%s "
             "max_attempts=%s retry_after_seconds=%s retry_after_source=%s "
@@ -494,11 +571,23 @@ class DatadogMetricSender:
             (time.monotonic() - batch_started) * 1000.0,
             masked_agent_id,
         )
+        await self._bounded_sleep(retry_after.seconds)
+        self._cooldown.complete_wait()
+
+    async def _bounded_sleep(self, seconds: float) -> None:
+        expires_at = self._expires_at.get()
+        if expires_at is not None:
+            remaining = expires_at - time.monotonic()
+            if remaining <= 0:
+                raise BatchExpiredError("Datadog batch expired during retry wait.")
+            seconds = min(seconds, remaining)
         await sleep_with_shutdown(
-            seconds=retry_after.seconds,
+            seconds=seconds,
             shutdown_event=self._shutdown_event,
             sleep_fn=self._sleep_fn,
         )
+        if expires_at is not None and time.monotonic() >= expires_at:
+            raise BatchExpiredError("Datadog batch expired during retry wait.")
 
     def _log_retry(
         self,
@@ -576,7 +665,9 @@ class DatadogMetricSender:
             self._logger.info(message, *args)
 
     def _logger_warning(self, message: str, *args: Any) -> None:
-        if self._logger is not None:
+        now = time.monotonic()
+        if self._logger is not None and now - self._last_warning_at >= 60.0:
+            self._last_warning_at = now
             self._logger.warning(message, *args)
 
     def _logger_error(self, message: str, *args: Any) -> None:
@@ -613,6 +704,7 @@ class DatadogNativeExporter(Exporter):
         self._dispatch_worker: BackgroundPayloadDispatcher | None = None
         self._dispatch_shutdown_event: threading.Event | None = None
         self._logger = logger
+        self._statistics = ExportStatistics()
         self._initialized = False
 
     def initialize(self) -> None:
@@ -674,18 +766,26 @@ class DatadogNativeExporter(Exporter):
                 retry_after_max_seconds=retry_after_max_seconds,
                 agent_id=get_heka_agent_id(logger=self._logger),
                 shutdown_event=self._dispatch_shutdown_event,
+                cooldown_enabled=get_export_cooldown_enabled(),
+                statistics=self._statistics,
                 logger=self._logger,
             )
         elif self._dispatch_shutdown_event is None:
             self._dispatch_shutdown_event = threading.Event()
 
         if self._background_dispatch and self._sender is not None:
+            get_export_queue_overflow_policy()
             if self._dispatch_shutdown_event is None:
                 self._dispatch_shutdown_event = threading.Event()
             self._dispatch_worker = BackgroundPayloadDispatcher(
                 sender=self._sender,
                 worker_name="datadog-native-export",
                 shutdown_event=self._dispatch_shutdown_event,
+                max_batches=get_export_queue_max_batches(),
+                max_bytes=get_export_queue_max_bytes(),
+                max_batch_age_seconds=get_export_max_batch_age_seconds(),
+                shutdown_timeout_seconds=get_export_shutdown_timeout_seconds(),
+                statistics=self._statistics,
                 logger=self._logger,
             )
 
@@ -702,7 +802,7 @@ class DatadogNativeExporter(Exporter):
 
         payload = self._mapper.map_metrics(metrics)
         if self._dispatch_worker is not None:
-            self._dispatch_worker.submit(payload)
+            self._dispatch_worker.submit(payload, record_count=len(metrics))
             return
         self._sender.send(payload)
 
@@ -722,3 +822,9 @@ class DatadogNativeExporter(Exporter):
             "metric_prefix": self._metric_prefix,
             "count_interval_seconds": self._count_interval_seconds,
         }
+
+    def diagnostics_snapshot(self) -> dict[str, Any]:
+        """Return non-sensitive bounded-dispatch diagnostics."""
+        if self._dispatch_worker is None:
+            return {"counters": {}, "gauges": {}}
+        return self._dispatch_worker.snapshot()

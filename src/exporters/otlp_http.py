@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import json
 import logging
 import threading
@@ -28,10 +29,21 @@ from config import (
     get_otlp_retry_after_max_seconds,
     get_otlp_resource_attributes,
 )
+from config.runtime import (
+    get_export_cooldown_enabled,
+    get_export_max_batch_age_seconds,
+    get_export_queue_max_batches,
+    get_export_queue_max_bytes,
+    get_export_queue_overflow_policy,
+    get_export_shutdown_timeout_seconds,
+)
 
 from .base import CanonicalMetricCollection, Exporter
 from .http_common import (
+    BatchExpiredError,
     BackgroundPayloadDispatcher,
+    EndpointCooldown,
+    ExportStatistics,
     ShutdownRequestedError,
     SleepFn,
     mask_identifier,
@@ -65,6 +77,8 @@ class OtlpHttpMetricSender:
         http_client: Callable[..., Any] | None = None,
         sleep_fn: SleepFn | None = None,
         shutdown_event: threading.Event | None = None,
+        cooldown_enabled: bool = True,
+        statistics: ExportStatistics | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._endpoint = endpoint.strip()
@@ -84,17 +98,50 @@ class OtlpHttpMetricSender:
         self._http_client = http_client or urlopen
         self._sleep_fn = sleep_fn
         self._shutdown_event = shutdown_event or threading.Event()
+        self._statistics = statistics
+        self._cooldown = EndpointCooldown(
+            enabled=cooldown_enabled,
+            statistics=statistics,
+        )
+        self._expires_at: ContextVar[float | None] = ContextVar(
+            "otlp_batch_expires_at", default=None
+        )
         self._logger = logger
+        self._last_warning_at = float("-inf")
         self._validate_retry_policy()
         self._validate_endpoint()
 
     def send(self, payload: Mapping[str, Any]) -> None:
         """Dispatch payload as an OTLP HTTP POST request."""
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        idempotency_key = self._create_idempotency_key()
-        asyncio.run(self._send_async(body, idempotency_key=idempotency_key))
+        self.send_serialized(body)
 
-    async def _send_async(self, body: bytes, *, idempotency_key: str) -> None:
+    def send_serialized(self, body: bytes, *, expires_at: float | None = None) -> None:
+        """Dispatch an already serialized OTLP request body."""
+        idempotency_key = self._create_idempotency_key()
+        token = self._expires_at.set(expires_at)
+        try:
+            asyncio.run(
+                self._send_async(
+                    body,
+                    idempotency_key=idempotency_key,
+                    expires_at=expires_at,
+                )
+            )
+        finally:
+            self._expires_at.reset(token)
+
+    def refresh_diagnostics(self) -> None:
+        """Refresh time-dependent cooldown gauges."""
+        self._cooldown.remaining()
+
+    async def _send_async(
+        self,
+        body: bytes,
+        *,
+        idempotency_key: str,
+        expires_at: float | None = None,
+    ) -> None:
         batch_started = time.monotonic()
         masked_agent_id = self._masked_agent_id()
         masked_idempotency_key = mask_identifier(idempotency_key)
@@ -103,6 +150,10 @@ class OtlpHttpMetricSender:
         for attempt in range(1, self._retry_max_attempts + 1):
             if self._shutdown_event.is_set():
                 raise ShutdownRequestedError("Shutdown requested before OTLP export.")
+            await self._wait_for_cooldown(expires_at=expires_at)
+            self._ensure_not_expired(expires_at)
+            if self._statistics is not None:
+                self._statistics.increment("request_attempts")
 
             request = self._build_request(body, idempotency_key=idempotency_key)
             request_started = time.monotonic()
@@ -156,14 +207,19 @@ class OtlpHttpMetricSender:
                 raise RuntimeError(
                     f"OTLP HTTP export failed with HTTP error {exc.code}: {exc.reason}."
                 ) from exc
-            except URLError as exc:
+            except (URLError, TimeoutError, OSError) as exc:
+                if self._statistics is not None:
+                    self._statistics.increment("network_failures")
+                reason = getattr(exc, "reason", str(exc))
                 request_ms = (time.monotonic() - request_started) * 1000.0
                 if self._should_retry(status_code=None, attempt=attempt):
+                    if self._statistics is not None:
+                        self._statistics.increment("retry_attempts")
                     self._log_retry(
                         status_code="transport",
                         attempt=attempt,
                         request_ms=request_ms,
-                        reason=f"transport_error={exc.reason}",
+                        reason=f"transport_error={reason}",
                         masked_agent_id=masked_agent_id,
                         masked_idempotency_key=masked_idempotency_key,
                     )
@@ -181,11 +237,11 @@ class OtlpHttpMetricSender:
                     (time.monotonic() - batch_started) * 1000.0,
                     masked_agent_id,
                     masked_idempotency_key,
-                    exc.reason,
+                    reason,
                 )
                 raise RuntimeError(
                     f"OTLP HTTP export failed to reach endpoint '{self._endpoint}': "
-                    f"{exc.reason}."
+                    f"{reason}."
                 ) from exc
 
     def _build_request(self, body: bytes, *, idempotency_key: str) -> Request:
@@ -208,18 +264,28 @@ class OtlpHttpMetricSender:
         masked_agent_id: str,
         masked_idempotency_key: str,
     ) -> bool:
-        if status_code == 429 and self._should_retry(status_code=status_code, attempt=attempt):
-            await self._sleep_for_retry_after(
-                attempt=attempt,
-                headers=headers,
-                request_ms=request_ms,
-                batch_started=batch_started,
-                masked_agent_id=masked_agent_id,
-                masked_idempotency_key=masked_idempotency_key,
-            )
-            return True
+        if status_code == 429:
+            if self._statistics is not None:
+                self._statistics.increment("http_429_responses")
+            retry_after = self._retry_after(headers)
+            self._cooldown.activate(retry_after.seconds)
+            if self._should_retry(status_code=status_code, attempt=attempt):
+                await self._sleep_for_retry_after(
+                    attempt=attempt,
+                    retry_after=retry_after,
+                    request_ms=request_ms,
+                    batch_started=batch_started,
+                    masked_agent_id=masked_agent_id,
+                    masked_idempotency_key=masked_idempotency_key,
+                )
+                return True
+
+        if self._statistics is not None and 500 <= status_code <= 599:
+            self._statistics.increment("http_5xx_responses")
 
         if self._should_retry(status_code=status_code, attempt=attempt):
+            if self._statistics is not None:
+                self._statistics.increment("retry_attempts")
             self._log_retry(
                 status_code=status_code,
                 attempt=attempt,
@@ -251,18 +317,28 @@ class OtlpHttpMetricSender:
         masked_agent_id: str,
         masked_idempotency_key: str,
     ) -> bool:
-        if exc.code == 429 and self._should_retry(status_code=exc.code, attempt=attempt):
-            await self._sleep_for_retry_after(
-                attempt=attempt,
-                headers=exc.headers,
-                request_ms=request_ms,
-                batch_started=batch_started,
-                masked_agent_id=masked_agent_id,
-                masked_idempotency_key=masked_idempotency_key,
-            )
-            return True
+        if exc.code == 429:
+            if self._statistics is not None:
+                self._statistics.increment("http_429_responses")
+            retry_after = self._retry_after(exc.headers)
+            self._cooldown.activate(retry_after.seconds)
+            if self._should_retry(status_code=exc.code, attempt=attempt):
+                await self._sleep_for_retry_after(
+                    attempt=attempt,
+                    retry_after=retry_after,
+                    request_ms=request_ms,
+                    batch_started=batch_started,
+                    masked_agent_id=masked_agent_id,
+                    masked_idempotency_key=masked_idempotency_key,
+                )
+                return True
+
+        if self._statistics is not None and 500 <= exc.code <= 599:
+            self._statistics.increment("http_5xx_responses")
 
         if self._should_retry(status_code=exc.code, attempt=attempt):
+            if self._statistics is not None:
+                self._statistics.increment("retry_attempts")
             self._log_retry(
                 status_code=exc.code,
                 attempt=attempt,
@@ -303,27 +379,20 @@ class OtlpHttpMetricSender:
             self._retry_initial_backoff_seconds
             * (_RETRY_BACKOFF_MULTIPLIER ** (attempt - 1)),
         )
-        await sleep_with_shutdown(
-            seconds=backoff_seconds,
-            shutdown_event=self._shutdown_event,
-            sleep_fn=self._sleep_fn,
-        )
+        await self._bounded_sleep(backoff_seconds)
 
     async def _sleep_for_retry_after(
         self,
         *,
         attempt: int,
-        headers: Mapping[str, Any] | None,
+        retry_after: Any,
         request_ms: float,
         batch_started: float,
         masked_agent_id: str,
         masked_idempotency_key: str,
     ) -> None:
-        retry_after = parse_retry_after_delay(
-            headers=headers,
-            default_seconds=self._retry_after_default_seconds,
-            max_seconds=self._retry_after_max_seconds,
-        )
+        if self._statistics is not None:
+            self._statistics.increment("retry_attempts")
         self._logger_warning(
             "OTLP export rate limited; endpoint=%s status=429 attempt=%s max_attempts=%s "
             "retry_after_seconds=%s retry_after_source=%s retry_after_default_used=%s "
@@ -344,11 +413,51 @@ class OtlpHttpMetricSender:
             masked_agent_id,
             masked_idempotency_key,
         )
+        await self._bounded_sleep(retry_after.seconds)
+        self._cooldown.complete_wait()
+
+    def _retry_after(self, headers: Mapping[str, Any] | None) -> Any:
+        return parse_retry_after_delay(
+            headers=headers,
+            default_seconds=self._retry_after_default_seconds,
+            max_seconds=self._retry_after_max_seconds,
+        )
+
+    async def _bounded_sleep(self, seconds: float) -> None:
+        expires_at = self._expires_at.get()
+        if expires_at is not None:
+            remaining = expires_at - time.monotonic()
+            if remaining <= 0:
+                raise BatchExpiredError("OTLP batch expired during retry wait.")
+            seconds = min(seconds, remaining)
         await sleep_with_shutdown(
-            seconds=retry_after.seconds,
+            seconds=seconds,
             shutdown_event=self._shutdown_event,
             sleep_fn=self._sleep_fn,
         )
+        self._ensure_not_expired(expires_at)
+
+    async def _wait_for_cooldown(self, *, expires_at: float | None) -> None:
+        delay = self._cooldown.remaining()
+        if delay <= 0:
+            return
+        if expires_at is not None:
+            remaining_lifetime = expires_at - time.monotonic()
+            if remaining_lifetime <= 0:
+                raise BatchExpiredError("OTLP batch expired before export.")
+            delay = min(delay, remaining_lifetime)
+        await sleep_with_shutdown(
+            seconds=delay,
+            shutdown_event=self._shutdown_event,
+            sleep_fn=self._sleep_fn,
+        )
+        self._ensure_not_expired(expires_at)
+        self._cooldown.complete_wait()
+
+    @staticmethod
+    def _ensure_not_expired(expires_at: float | None) -> None:
+        if expires_at is not None and time.monotonic() >= expires_at:
+            raise BatchExpiredError("OTLP batch expired before export.")
 
     def _log_retry(
         self,
@@ -508,7 +617,9 @@ class OtlpHttpMetricSender:
             self._logger.debug(message, *args)
 
     def _logger_warning(self, message: str, *args: Any) -> None:
-        if self._logger is not None:
+        now = time.monotonic()
+        if self._logger is not None and now - self._last_warning_at >= 60.0:
+            self._last_warning_at = now
             self._logger.warning(message, *args)
 
     def _logger_error(self, message: str, *args: Any) -> None:
@@ -543,6 +654,7 @@ class OtlpHttpExporter(Exporter):
         self._dispatch_worker: BackgroundPayloadDispatcher | None = None
         self._dispatch_shutdown_event: threading.Event | None = None
         self._logger = logger
+        self._statistics = ExportStatistics()
         self._initialized = False
 
     def initialize(self) -> None:
@@ -612,18 +724,26 @@ class OtlpHttpExporter(Exporter):
                 retry_after_max_seconds=retry_after_max_seconds,
                 headers=resolved_headers,
                 shutdown_event=self._dispatch_shutdown_event,
+                cooldown_enabled=get_export_cooldown_enabled(),
+                statistics=self._statistics,
                 logger=self._logger,
             )
         elif self._dispatch_shutdown_event is None:
             self._dispatch_shutdown_event = threading.Event()
 
         if self._background_dispatch and self._sender is not None:
+            get_export_queue_overflow_policy()
             if self._dispatch_shutdown_event is None:
                 self._dispatch_shutdown_event = threading.Event()
             self._dispatch_worker = BackgroundPayloadDispatcher(
                 sender=self._sender,
                 worker_name="otlp-http-export",
                 shutdown_event=self._dispatch_shutdown_event,
+                max_batches=get_export_queue_max_batches(),
+                max_bytes=get_export_queue_max_bytes(),
+                max_batch_age_seconds=get_export_max_batch_age_seconds(),
+                shutdown_timeout_seconds=get_export_shutdown_timeout_seconds(),
+                statistics=self._statistics,
                 logger=self._logger,
             )
         self._initialized = True
@@ -639,7 +759,7 @@ class OtlpHttpExporter(Exporter):
 
         payload = self._mapper.map_metrics(metrics)
         if self._dispatch_worker is not None:
-            self._dispatch_worker.submit(payload)
+            self._dispatch_worker.submit(payload, record_count=len(metrics))
             return
         self._sender.send(payload)
 
@@ -657,3 +777,9 @@ class OtlpHttpExporter(Exporter):
             "headers_configured": len(self._headers or {}),
             "resource_attributes_configured": len(self._resource_attributes or {}),
         }
+
+    def diagnostics_snapshot(self) -> dict[str, Any]:
+        """Return non-sensitive bounded-dispatch diagnostics."""
+        if self._dispatch_worker is None:
+            return {"counters": {}, "gauges": {}}
+        return self._dispatch_worker.snapshot()
