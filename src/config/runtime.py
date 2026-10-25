@@ -162,7 +162,7 @@ def get_export_shutdown_timeout_seconds() -> float:
 
 
 def get_agent_diagnostics_enabled() -> bool:
-    return _get_strict_bool(HEKA_AGENT_DIAGNOSTICS_ENABLED_ENV_KEY, False)
+    return _get_strict_bool(HEKA_AGENT_DIAGNOSTICS_ENABLED_ENV_KEY, True)
 
 
 def get_agent_diagnostics_interval_seconds() -> float:

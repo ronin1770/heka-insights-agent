@@ -13,6 +13,9 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from config.runtime import (
+    get_agent_diagnostics_enabled,
+    get_agent_diagnostics_interval_seconds,
+    get_agent_tracemalloc_enabled,
     get_export_queue_max_batches,
     get_export_queue_overflow_policy,
     get_log_level,
@@ -25,6 +28,9 @@ class Issue33ConfigurationTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(get_export_queue_max_batches(), 64)
             self.assertEqual(get_export_queue_overflow_policy(), "drop_oldest")
+            self.assertTrue(get_agent_diagnostics_enabled())
+            self.assertEqual(get_agent_diagnostics_interval_seconds(), 60.0)
+            self.assertFalse(get_agent_tracemalloc_enabled())
             self.assertEqual(get_log_level(), logging.INFO)
         with patch.dict(os.environ, {"HEKA_EXPORT_QUEUE_MAX_BATCHES": "0"}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "HEKA_EXPORT_QUEUE_MAX_BATCHES"):

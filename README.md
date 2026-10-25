@@ -451,7 +451,7 @@ HEKA_EXPORT_QUEUE_OVERFLOW_POLICY=drop_oldest
 HEKA_EXPORT_MAX_BATCH_AGE_SECONDS=120
 HEKA_EXPORT_COOLDOWN_ENABLED=true
 HEKA_EXPORT_SHUTDOWN_TIMEOUT_SECONDS=5
-HEKA_AGENT_DIAGNOSTICS_ENABLED=false
+HEKA_AGENT_DIAGNOSTICS_ENABLED=true
 HEKA_AGENT_DIAGNOSTICS_INTERVAL_SECONDS=60
 HEKA_AGENT_TRACEMALLOC_ENABLED=false
 # New Relic OTLP preset (optional)
@@ -480,10 +480,11 @@ with `HEKA_EXPORT_QUEUE_MAX_BATCHES`, `HEKA_EXPORT_QUEUE_MAX_BYTES`,
 Endpoint-wide HTTP 429 cooldown is enabled by default through
 `HEKA_EXPORT_COOLDOWN_ENABLED`; existing OTLP retry variables and defaults are unchanged.
 
-Local self-diagnostics are disabled by default. Enable them with
-`HEKA_AGENT_DIAGNOSTICS_ENABLED=true`; control cadence with
+Local self-diagnostics are enabled by default with a 60-second cadence. Disable them with
+`HEKA_AGENT_DIAGNOSTICS_ENABLED=false`; control cadence with
 `HEKA_AGENT_DIAGNOSTICS_INTERVAL_SECONDS`, and opt into Python allocation tracing with
-`HEKA_AGENT_TRACEMALLOC_ENABLED=true`. Diagnostics are written locally and never exported.
+`HEKA_AGENT_TRACEMALLOC_ENABLED=true`. Tracemalloc remains disabled by default.
+Diagnostics are written locally and never exported.
 
 Logs default to INFO with a 10 MiB active file and three backups. Configure
 `HEKA_LOG_LEVEL`, `HEKA_LOG_MAX_BYTES`, and `HEKA_LOG_BACKUP_COUNT`. Complete collector
