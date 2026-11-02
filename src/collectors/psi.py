@@ -23,6 +23,7 @@ class PSICollector:
     ) -> None:
         self._proc_root = Path(proc_root)
         self._logger = logger or logging.getLogger(__name__)
+        self._availability: dict[str, bool] = {}
 
     def collect(self) -> dict[str, dict[str, dict[str, float | int]]]:
         """Return valid PSI measurements, omitting unavailable resources."""
@@ -38,6 +39,11 @@ class PSICollector:
                     path,
                     exc,
                 )
+                self._report_availability(
+                    resource,
+                    available=False,
+                    reason=f"source unreadable: {exc}",
+                )
                 continue
 
             measurements = parse_psi_pressure(
@@ -47,7 +53,40 @@ class PSICollector:
             )
             if measurements:
                 collected[resource] = measurements
+                self._report_availability(resource, available=True)
+            else:
+                self._report_availability(
+                    resource,
+                    available=False,
+                    reason="source contained no valid measurements",
+                )
         return collected
+
+    def availability_snapshot(self) -> dict[str, bool]:
+        """Return the latest observed availability for each PSI resource."""
+        return dict(self._availability)
+
+    def _report_availability(
+        self,
+        resource: str,
+        *,
+        available: bool,
+        reason: str | None = None,
+    ) -> None:
+        """Log PSI availability only when its state changes."""
+        previous = self._availability.get(resource)
+        self._availability[resource] = available
+        if previous is available:
+            return
+        if available:
+            if previous is False:
+                self._logger.info("PSI source recovered | resource=%s", resource)
+            return
+        self._logger.warning(
+            "PSI source unavailable | resource=%s | reason=%s",
+            resource,
+            reason or "unknown",
+        )
 
 
 def parse_psi_pressure(

@@ -22,15 +22,32 @@ from collectors.memory import MemoryCollector
 from collectors.process import ProcessCollector
 from collectors.proc import ProcCollector
 from collectors.psi import PSICollector
-from diagnostics import AgentDiagnostics
+from diagnostics import AgentDiagnostics, CollectionStatistics
 from exporters import Exporter, create_exporter
 from logger.config import get_logger
 from pipeline import build_canonical_metrics
 from setup_wizard import resume_setup_command, run_setup_wizard
 
+_DELAYED_COLLECTION_INTERVAL_SECONDS = 10.0
+
+
+def _advance_schedule(
+    next_collection: float,
+    *,
+    interval_seconds: float,
+    current_monotonic: float,
+) -> tuple[float, int]:
+    """Advance a due schedule and return the number of skipped occurrences."""
+    occurrences = 0
+    while next_collection <= current_monotonic:
+        next_collection += interval_seconds
+        occurrences += 1
+    return next_collection, max(0, occurrences - 1)
+
 
 def run_collectors_loop(*, exporter: Exporter, exporter_type: ExporterType,
-                        logger: logging.Logger) -> None:
+                        logger: logging.Logger,
+                        collection_statistics: CollectionStatistics | None = None) -> None:
     """Run host and process collectors on their configured cadences."""
     interval_seconds = get_cpu_poll_interval_seconds(logger=logger)
     process_interval_seconds = get_process_poll_interval_seconds(logger=logger)
@@ -50,6 +67,8 @@ def run_collectors_loop(*, exporter: Exporter, exporter_type: ExporterType,
     selected_processes: list[dict[str, object]] = []
     ticker = MonotonicTicker(interval_seconds=interval_seconds)
     log_payloads = get_log_payloads_enabled()
+    timing = collection_statistics or CollectionStatistics()
+    previous_collection_time: float | None = None
 
     logger.info(
         "Collectors initialized | interval_seconds=%.1f | process_interval_seconds=%.1f | "
@@ -71,6 +90,23 @@ def run_collectors_loop(*, exporter: Exporter, exporter_type: ExporterType,
 
         payloads = {"cpu": cpu_payload, "memory": memory_payload, "disk": disk_payload}
         current_monotonic = time.monotonic()
+        actual_interval = (
+            current_monotonic - previous_collection_time
+            if previous_collection_time is not None
+            else None
+        )
+        previous_collection_time = current_monotonic
+        delayed = (
+            actual_interval is not None
+            and actual_interval > _DELAYED_COLLECTION_INTERVAL_SECONDS
+        )
+        if delayed:
+            logger.warning(
+                "Collection interval exceeded threshold | actual_seconds=%.3f | "
+                "threshold_seconds=%.1f",
+                actual_interval,
+                _DELAYED_COLLECTION_INTERVAL_SECONDS,
+            )
         if current_monotonic >= next_process_collection:
             process_payload = process_collector.collect()
             payloads["process"] = process_payload
@@ -79,16 +115,34 @@ def run_collectors_loop(*, exporter: Exporter, exporter_type: ExporterType,
             entries = process_payload.get("processes")
             if isinstance(entries, list):
                 selected_processes = entries
-            while next_process_collection <= current_monotonic:
-                next_process_collection += process_interval_seconds
+            next_process_collection, skipped = _advance_schedule(
+                next_process_collection,
+                interval_seconds=process_interval_seconds,
+                current_monotonic=current_monotonic,
+            )
+            timing.record_skipped("process", skipped)
+            if skipped:
+                logger.warning(
+                    "Scheduled collections skipped | collector=process | count=%d",
+                    skipped,
+                )
 
         if current_monotonic >= next_proc_collection:
             proc_payload = proc_collector.collect(selected_processes)
             payloads["proc"] = proc_payload
             if log_payloads:
                 logger.debug("Procfs metrics: %s", proc_payload)
-            while next_proc_collection <= current_monotonic:
-                next_proc_collection += proc_interval_seconds
+            next_proc_collection, skipped = _advance_schedule(
+                next_proc_collection,
+                interval_seconds=proc_interval_seconds,
+                current_monotonic=current_monotonic,
+            )
+            timing.record_skipped("proc", skipped)
+            if skipped:
+                logger.warning(
+                    "Scheduled collections skipped | collector=proc | count=%d",
+                    skipped,
+                )
 
         if current_monotonic >= next_psi_collection:
             psi_payload = psi_collector.collect()
@@ -96,14 +150,24 @@ def run_collectors_loop(*, exporter: Exporter, exporter_type: ExporterType,
                 payloads["psi"] = psi_payload
                 if log_payloads:
                     logger.debug("PSI metrics: %s", psi_payload)
-            while next_psi_collection <= current_monotonic:
-                next_psi_collection += psi_interval_seconds
+            next_psi_collection, skipped = _advance_schedule(
+                next_psi_collection,
+                interval_seconds=psi_interval_seconds,
+                current_monotonic=current_monotonic,
+            )
+            timing.record_skipped("psi", skipped)
+            if skipped:
+                logger.warning(
+                    "Scheduled collections skipped | collector=psi | count=%d",
+                    skipped,
+                )
 
         metrics = build_canonical_metrics(payloads, timestamp_unix_ms=int(time.time() * 1000))
         try:
             exporter.export(metrics)
         except RuntimeError as exc:
             logger.error("Batch export failed; error=%s", exc)
+        timing.record_cycle(interval_seconds=actual_interval, delayed=delayed)
         ticker.sleep()
 
 
@@ -121,10 +185,20 @@ def run_agent() -> int:
         exporter_type = get_exporter_type(logger=logger)
         exporter = create_exporter(exporter_type, logger=logger)
         exporter.initialize()
-        diagnostics = AgentDiagnostics(exporter=exporter, logger=logger)
+        collection_statistics = CollectionStatistics()
+        diagnostics = AgentDiagnostics(
+            exporter=exporter,
+            logger=logger,
+            collection_statistics=collection_statistics,
+        )
         diagnostics.start()
         try:
-            run_collectors_loop(exporter=exporter, exporter_type=exporter_type, logger=logger)
+            run_collectors_loop(
+                exporter=exporter,
+                exporter_type=exporter_type,
+                logger=logger,
+                collection_statistics=collection_statistics,
+            )
         except KeyboardInterrupt:
             logger.info("Shutdown requested by user")
         finally:

@@ -203,6 +203,26 @@ Heka Insights Agent is intended to collect and normalize machine telemetry such 
 
 Unsupported or inaccessible metrics are omitted instead of being reported as zero.
 
+#### CPU and Memory Metrics
+
+| Metric | Description | Type | Unit |
+|---|---|---|---|
+| `heka_cpu_usage_percent` | System-wide CPU utilization normalized to 0–100%, independent of CPU count. | Gauge | percent |
+| `heka_cpu_time_percent` | CPU time percentage by the `mode` attribute. | Gauge | percent |
+| `heka_memory_virtual_used_bytes` | `MemTotal - MemAvailable` on supported Linux systems. | Gauge | bytes |
+| `heka_memory_virtual_available_bytes` | Memory available without swapping (`MemAvailable`). | Gauge | bytes |
+| `heka_memory_virtual_total_bytes` | Total physical memory (`MemTotal`). | Gauge | bytes |
+| `heka_memory_swap_used_bytes` | Occupied swap space; this is not swap activity. | Gauge | bytes |
+| `heka_memory_swap_total_bytes` | Total configured swap space. | Gauge | bytes |
+
+CPU utilization is calculated from deltas between CPU-time snapshots. Linux `idle` and
+`iowait` are treated as idle, `steal` is treated as busy, and `guest`/`guest_nice` are
+excluded from the total because Linux already includes them in `user`/`nice`. The first
+sample after startup or reset is a warm-up sample and emits no CPU utilization metric.
+
+The Agent exports memory occupancy separately from swap occupancy. It does not interpret
+occupied swap as evidence of current swap-in or swap-out pressure.
+
 #### TCP Connection Metrics
 
 | Metric | Description | Type | Attributes |
@@ -485,6 +505,16 @@ Local self-diagnostics are enabled by default with a 60-second cadence. Disable 
 `HEKA_AGENT_DIAGNOSTICS_INTERVAL_SECONDS`, and opt into Python allocation tracing with
 `HEKA_AGENT_TRACEMALLOC_ENABLED=true`. Tracemalloc remains disabled by default.
 Diagnostics are written locally and never exported.
+
+Self-diagnostics also include collection-loop counters and interval gauges. Intervals over
+10 seconds are counted as delayed and logged at warning level. When a slower collector's
+schedule advances past one or more due occurrences, the skipped count is recorded separately
+for process, procfs, and PSI collection. PSI source unavailability and recovery are logged on
+state transitions; unavailable PSI observations remain omitted rather than becoming zero.
+
+Canonical metrics in one loop share a UTC Unix observation timestamp assigned after the
+scheduled collectors complete and before export submission. Export retries and queueing
+preserve that timestamp; export time is available only through exporter diagnostics and logs.
 
 Logs default to INFO with a 10 MiB active file and three backups. Configure
 `HEKA_LOG_LEVEL`, `HEKA_LOG_MAX_BYTES`, and `HEKA_LOG_BACKUP_COUNT`. Complete collector

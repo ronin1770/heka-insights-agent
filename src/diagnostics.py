@@ -8,6 +8,7 @@ import threading
 import time
 import tracemalloc
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
@@ -21,12 +22,64 @@ from config.runtime import (
 from exporters import Exporter
 
 
+class CollectionStatistics:
+    """Thread-safe process-lifetime collection timing diagnostics."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counters: Counter[str] = Counter()
+        self._gauges: dict[str, float | None] = {
+            "last_interval_seconds": None,
+            "max_interval_seconds": 0.0,
+        }
+
+    def record_cycle(
+        self,
+        *,
+        interval_seconds: float | None,
+        delayed: bool,
+    ) -> None:
+        """Record one completed collection loop cycle."""
+        with self._lock:
+            self._counters["completed_cycles"] += 1
+            if delayed:
+                self._counters["delayed_cycles"] += 1
+            if interval_seconds is not None:
+                self._gauges["last_interval_seconds"] = interval_seconds
+                self._gauges["max_interval_seconds"] = max(
+                    float(self._gauges["max_interval_seconds"] or 0.0),
+                    interval_seconds,
+                )
+
+    def record_skipped(self, collector: str, count: int) -> None:
+        """Record scheduled collections skipped while advancing a cadence."""
+        if count <= 0:
+            return
+        with self._lock:
+            self._counters[f"skipped_{collector}_cycles"] += count
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a detached diagnostics snapshot."""
+        with self._lock:
+            return {
+                "counters": dict(self._counters),
+                "gauges": dict(self._gauges),
+            }
+
+
 class AgentDiagnostics:
     """Periodically write one diagnostic snapshot without retaining history."""
 
-    def __init__(self, *, exporter: Exporter, logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        *,
+        exporter: Exporter,
+        logger: logging.Logger,
+        collection_statistics: CollectionStatistics | None = None,
+    ) -> None:
         self._exporter = exporter
         self._logger = logger
+        self._collection_statistics = collection_statistics
         self._enabled = get_agent_diagnostics_enabled()
         self._interval = get_agent_diagnostics_interval_seconds()
         self._trace_enabled = get_agent_tracemalloc_enabled()
@@ -108,6 +161,12 @@ class AgentDiagnostics:
         if tracemalloc.is_tracing():
             traced_current, traced_peak = tracemalloc.get_traced_memory()
 
+        collection_snapshot = (
+            self._collection_statistics.snapshot()
+            if self._collection_statistics is not None
+            else {"counters": {}, "gauges": {}}
+        )
+
         return {
             "event": "agent_self_diagnostics",
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -127,6 +186,7 @@ class AgentDiagnostics:
                 "threads": self._process.num_threads(),
                 "open_fds": self._safe_num_fds(),
             },
+            "collection": collection_snapshot,
             "exporter": {
                 "cumulative": counters,
                 "interval": interval,

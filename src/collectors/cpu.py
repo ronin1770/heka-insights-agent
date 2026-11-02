@@ -11,6 +11,7 @@ import psutil
 MetricDetail = Literal["basic", "detailed"]
 
 _IDLE_FIELDS = frozenset({"idle", "iowait"})
+_LINUX_GUEST_FIELDS = frozenset({"guest", "guest_nice"})
 _EPSILON = 1e-12
 
 
@@ -162,7 +163,12 @@ class CPUCollector:
             if delta < 0.0:
                 delta = 0.0
 
-            total += delta
+            # Linux reports guest time as part of user/nice as well as in the
+            # guest/guest_nice fields. Excluding the guest fields from the
+            # denominator avoids counting the same CPU time twice and matches
+            # psutil's Linux system-wide CPU percentage semantics.
+            if field_name not in _LINUX_GUEST_FIELDS:
+                total += delta
             if field_name in _IDLE_FIELDS:
                 idle += delta
 
